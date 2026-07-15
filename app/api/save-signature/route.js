@@ -2,7 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import { PDFDocument, degrees } from 'pdf-lib';
 import { Resend } from 'resend';
 
-// Membaca dari Environment Variable (Aman dari robot pemindai GitHub)
+// Membaca dari Environment Variable
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://khlpzyyshtuwronalntr.supabase.co'; 
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY; 
 const resend = new Resend(process.env.RESEND_API_KEY); 
@@ -12,8 +12,8 @@ const supabase = createClient(cleanUrl, supabaseAnonKey);
 
 export async function POST(request) {
   try {
-    // Ambil parameter koordinat dari halaman depan
-    const { documentId, signatureImage, coordinateX, coordinateY, pageNumber } = await request.json();
+    // Ambil parameter dari frontend
+    const { documentId, signatureImage, coordinateX, coordinateY, pageNumber, containerWidth, containerHeight } = await request.json();
 
     // 1. Ambil data dokumen dari Supabase
     const { data: docData, error: fetchError } = await supabase
@@ -23,64 +23,84 @@ export async function POST(request) {
       .single();
 
     if (fetchError || !docData) {
-      return new Response(JSON.stringify({ error: "Dokumen tidak ditemukan di database Mahanaim" }), { status: 404 });
+      return new Response(JSON.stringify({ error: "Dokumen tidak ditemukan di database" }), { status: 404 });
     }
 
-    // 2. Load berkas PDF asli ke dalam memory mesin pdf-lib
+    // 2. Load berkas PDF ke memory mesin pdf-lib
     const pdfBase64Raw = docData.file_url.split(';base64,')[1] || docData.file_url;
     const pdfDoc = await PDFDocument.load(Buffer.from(pdfBase64Raw, 'base64'));
 
     const pages = pdfDoc.getPages();
     const targetPage = pages[pageNumber - 1];
     
-    // Dapatkan dimensi asli kertas PDF
+    // Dapatkan dimensi asli kertas PDF (Absolut)
     const { width: pageWidth, height: pageHeight } = targetPage.getSize();
-    
-    // Deteksi rotasi bawaan dokumen (jika discan miring oleh mesin printer/scanner)
     const pageRotation = targetPage.getRotation().angle; 
 
-    // 3. Konversi coretan tanda tangan menjadi objek gambar PDF
+    // 3. Konversi gambar tanda tangan dan dapatkan ukuran aslinya
     const sigImageRaw = signatureImage.split(';base64,')[1] || signatureImage;
     const embeddedImage = await pdfDoc.embedPng(Buffer.from(sigImageRaw, 'base64'));
 
-    // Ukuran dimensi tanda tangan yang akan dicetak pada kertas PDF
-    const ttdWidth = 75; 
-    const ttdHeight = 37.5;
+    // --- FITUR ANTI-SKEW (MEMPERTAHANKAN RASIO ASLI) ---
+    // Dapatkan lebar dan tinggi asli dari coretan gambar tanda tangan
+    const originalWidth = embeddedImage.width;
+    const originalHeight = embeddedImage.height;
 
-    // 4. Kalibrasi Akurat Sumbu Koordinat agar Posisi Pas & Presisi
-    let finalX = coordinateX;
-    let finalY = pageHeight - coordinateY - ttdHeight; // Rumus presisi pembalik sumbu Y (atas layar ke bawah PDF)
+    // Tentukan lebar tanda tangan yang diinginkan di dokumen PDF (misalnya lebar tetap 85)
+    const ttdWidth = 85; 
+    
+    // Hitung tinggi secara proporsional agar bentuk tanda tangan TIDAK GEPENG/SKEW
+    const aspectRatio = originalHeight / originalWidth;
+    const ttdHeight = ttdWidth * aspectRatio;
+    // ----------------------------------------------------
+
+    // 4. Hitung Faktor Skala berdasarkan layar pratinjau dokumen
+    const scaleX = containerWidth ? (pageWidth / containerWidth) : 1;
+    const scaleY = containerHeight ? (pageHeight / containerHeight) : 1;
+
+    // Hitung posisi koordinat murni
+    let calculatedX = coordinateX * scaleX;
+    let calculatedY = pageHeight - (coordinateY * scaleY) - ttdHeight;
+
+    let finalX = calculatedX;
+    let finalY = calculatedY;
     let finalRotation = 0;
 
-    // Menyesuaikan posisi koordinat jika file PDF asli memiliki metadata rotasi terbalik
+    // Menyesuaikan posisi jika dokumen memiliki properti rotasi dari scanner
     if (pageRotation === 90) {
-      finalX = coordinateY;
-      finalY = coordinateX;
+      finalX = calculatedY;
+      finalY = calculatedX;
       finalRotation = -90;
     } else if (pageRotation === 180) {
-      finalX = pageWidth - coordinateX - ttdWidth;
-      finalY = coordinateY;
+      finalX = pageWidth - calculatedX - ttdWidth;
+      finalY = calculatedY;
       finalRotation = 180;
     } else if (pageRotation === 270) {
-      finalX = pageHeight - coordinateY - ttdHeight;
-      finalY = pageWidth - coordinateX - ttdWidth;
+      finalX = pageHeight - calculatedY - ttdHeight;
+      finalY = pageWidth - calculatedX - ttdWidth;
       finalRotation = 90;
     }
 
-    // 5. Gambar/Cetak tanda tangan fisik ke atas dokumen PDF
+    // Jaga agar tidak melebihi batas tepi halaman PDF
+    if (finalX < 0) finalX = 0;
+    if (finalY < 0) finalY = 0;
+    if (finalX + ttdWidth > pageWidth) finalX = pageWidth - ttdWidth;
+    if (finalY + ttdHeight > pageHeight) finalY = pageHeight - ttdHeight;
+
+    // 5. Cetak gambar tanda tangan secara permanen dengan rasio yang benar
     targetPage.drawImage(embeddedImage, {
       x: finalX,
       y: finalY, 
       width: ttdWidth,
-      height: ttdHeight,
-      rotate: degrees(finalRotation), // Mengunci tanda tangan agar selalu tegak lurus
+      height: ttdHeight, // Menggunakan tinggi proporsional otomatis (Bebas skew!)
+      rotate: degrees(finalRotation),
     });
 
-    // 6. Simpan dokumen PDF yang baru yang telah ditandatangani
+    // 6. Simpan hasil PDF baru
     const modifiedPdfBytes = await pdfDoc.save();
     const modifiedPdfBase64 = `data:application/pdf;base64,${Buffer.from(modifiedPdfBytes).toString('base64')}`;
 
-    // 7. Update status dokumen menjadi SIGNED di database Supabase
+    // 7. Perbarui data ke Supabase
     const { error: updateError } = await supabase
       .from('documents')
       .update({ 
@@ -93,7 +113,7 @@ export async function POST(request) {
       return new Response(JSON.stringify({ error: updateError.message }), { status: 500 });
     }
 
-    // 8. Kirim notifikasi email otomatis beserta file PDF lampiran akhir melalui Resend
+    // 8. Kirim notifikasi email otomatis
     try {
       const pdfBuffer = Buffer.from(modifiedPdfBytes);
 
