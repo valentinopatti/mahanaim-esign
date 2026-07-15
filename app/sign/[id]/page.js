@@ -2,16 +2,23 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import { createClient } from '@supabase/supabase-js';
+
+// Inisialisasi Supabase Client Langsung di Frontend
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://khlpzyyshtuwronalntr.supabase.co';
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 export default function SignDocumentPage() {
   const { id } = useParams();
   const router = useRouter();
 
-  // State Manajemen Dokumen dan Tanda Tangan
+  // State Utama
   const [documentData, setDocumentData] = useState(null);
   const [signatureImage, setSignatureImage] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [pdfLoadError, setPdfLoadError] = useState(false);
 
   // State Posisi Penempatan Tanda Tangan (Persentase 0 - 100%)
   const [position, setPosition] = useState({ x: 15, y: 35 });
@@ -26,39 +33,30 @@ export default function SignDocumentPage() {
   const dragStart = useRef({ x: 0, y: 0 });
   const positionStart = useRef({ x: 15, y: 35 });
 
-  // 1. Mengambil data dokumen secara adaptif dari database
+  // 1. AMBIL DATA DOKUMEN LANGSUNG DARI SUPABASE (Bebas dari Error API 404)
   useEffect(() => {
-    async function fetchDocument() {
-      // Mencoba rute universal terlebih dahulu
-      let targetUrl = `/api/documents/${id}`;
-      
+    async function getDocumentFromSupabase() {
       try {
-        let res = await fetch(targetUrl);
-        
-        // Jika rute pertama 404, arahkan ke fallback alternatif database umum
-        if (!res.ok) {
-          targetUrl = `/api/document?id=${id}`;
-          res = await fetch(targetUrl);
-        }
+        const { data, error } = await supabase
+          .from('documents')
+          .select('id, file_name, file_url')
+          .eq('id', id)
+          .single();
 
-        if (res.ok) {
-          const data = await res.json();
-          // Antisipasi jika struktur data dibungkus dalam objek internal
-          setDocumentData(data.data || data);
-        } else {
-          console.warn("Jalur API kustom tidak merespons, mengaktifkan mode fallback enkapsulasi URL.");
-          // Fallback darurat jika kedua API 404: Mengisi mock kontainer agar fungsi geser tidak terkunci
-          setDocumentData({ id: id, file_url: "" });
+        if (error) throw error;
+
+        if (data) {
+          setDocumentData(data);
         }
       } catch (err) {
-        console.error("Gagal memuat dokumen:", err);
-        setDocumentData({ id: id, file_url: "" });
+        console.error("Gagal mengambil data dari Supabase:", err);
+        setPdfLoadError(true);
       }
     }
-    if (id) fetchDocument();
+    if (id) getDocumentFromSupabase();
   }, [id]);
 
-  // 2. Fungsi Kanvas Coreti Tanda Tangan (Mouse & Touch HP)
+  // 2. Fungsi Kanvas Coretan Tanda Tangan
   let isDrawing = false;
 
   const startDrawing = (e) => {
@@ -105,10 +103,10 @@ export default function SignDocumentPage() {
     const dataUrl = canvasRef.current.toDataURL('image/png');
     setSignatureImage(dataUrl);
     setIsModalOpen(false);
-    setIsPlaced(true); // Memunculkan tanda tangan di layar pratinjau
+    setIsPlaced(true);
   };
 
-  // 3. FUNGSI DRAG & DROP PERANGKAT MOBILE (HP TOUCH) & DESKTOP MOUSE
+  // 3. FUNGSI DRAG & DROP MULTI-DEVICE (HP TOUCH & DESKTOP MOUSE)
   const handleStart = (e) => {
     isDragging.current = true;
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
@@ -117,7 +115,6 @@ export default function SignDocumentPage() {
     dragStart.current = { x: clientX, y: clientY };
     positionStart.current = { ...position };
 
-    // Mencegah konflik browser bawaan
     if (e.cancelable) e.preventDefault();
   };
 
@@ -132,14 +129,14 @@ export default function SignDocumentPage() {
 
     const containerRect = containerRef.current.getBoundingClientRect();
 
-    // Hitung perubahan posisi dalam format persentase murni (%)
+    // Mengubah pergeseran piksel menjadi persentase (%)
     const deltaPercentX = (deltaX / containerRect.width) * 100;
     const deltaPercentY = (deltaY / containerRect.height) * 100;
 
     let newX = positionStart.current.x + deltaPercentX;
     let newY = positionStart.current.y + deltaPercentY;
 
-    // Kunci ruang gerak agar tanda tangan tidak lepas keluar dari halaman kertas
+    // Kunci batas penempatan tanda tangan agar tidak keluar halaman
     if (newX < 0) newX = 0;
     if (newY < 0) newY = 0;
     if (newX > 85) newX = 85;
@@ -152,7 +149,7 @@ export default function SignDocumentPage() {
     isDragging.current = false;
   };
 
-  // 4. Submit Koordinat Persentase ke API Backend
+  // 4. Kirim Data Hasil Akhir Ke API
   const handleSubmitSignature = async () => {
     if (!signatureImage) return alert("Silakan tempel tanda tangan terlebih dahulu!");
     setLoading(true);
@@ -178,7 +175,7 @@ export default function SignDocumentPage() {
         alert(`Gagal menyimpan: ${errData.error}`);
       }
     } catch (err) {
-      alert("Terjadi gangguan koneksi pada sistem e-sign.");
+      alert("Terjadi gangguan koneksi sistem.");
     } finally {
       setLoading(false);
     }
@@ -189,7 +186,7 @@ export default function SignDocumentPage() {
       <header style={{ marginBottom: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
         <div>
           <h1 style={{ fontSize: '18px', margin: 0, color: '#1e3a8a' }}>Mahanaim Studio Sign</h1>
-          <p style={{ fontSize: '12px', color: '#666', margin: '2px 0 0 0' }}>ID Dokumen: {id}</p>
+          <p style={{ fontSize: '12px', color: '#666', margin: '2px 0 0 0' }}>Berkas: {documentData?.file_name || 'Memuat dokumen dari database...'}</p>
         </div>
         <button 
           onClick={() => setIsModalOpen(true)}
@@ -199,7 +196,7 @@ export default function SignDocumentPage() {
         </button>
       </header>
 
-      {/* KONTEN UTAMA AREA DOKUMEN */}
+      {/* BOX AREA PRATINJAU UTAMA */}
       <div 
         ref={containerRef} 
         style={{ 
@@ -209,17 +206,27 @@ export default function SignDocumentPage() {
           backgroundColor: '#ffffff', 
           width: '100%', 
           height: '75vh',
-          overflow: 'hidden'
+          overflow: 'hidden',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center'
         }}
       >
-        {/* Fallback visual jika iframe utama memuat URL internal */}
-        <iframe 
-          src={documentData?.file_url ? `${documentData.file_url}#toolbar=0` : `/api/view-pdf?id=${id}`}
-          style={{ width: '100%', height: '100%', border: 'none' }}
-          title="Pratinjau Kertas"
-        />
+        {pdfLoadError ? (
+          <div style={{ color: '#ef4444', textAlign: 'center', padding: '20px' }}>
+            ⚠️ Gagal memuat dokumen. Periksa kembali ID dokumen atau koneksi database Supabase Anda.
+          </div>
+        ) : documentData?.file_url ? (
+          <iframe 
+            src={`${documentData.file_url}#toolbar=0`}
+            style={{ width: '100%', height: '100%', border: 'none' }}
+            title="Pratinjau Kertas Dokumen"
+          />
+        ) : (
+          <div style={{ color: '#666', fontSize: '14px' }}>⏳ Mengunduh berkas dari cloud server...</div>
+        )}
 
-        {/* LAYER IMPLEMENTASI GESER JARI HP (TOUCH ACTION DILOCK) */}
+        {/* KOTAK TANDA TANGAN (TOUCH DRAG DI HP LOCK) */}
         {isPlaced && signatureImage && (
           <div
             onMouseDown={handleStart}
@@ -236,10 +243,10 @@ export default function SignDocumentPage() {
               width: '110px',
               padding: '5px',
               border: '2px dashed #16a34a',
-              backgroundColor: 'rgba(240, 253, 244, 0.85)',
+              backgroundColor: 'rgba(240, 253, 244, 0.9)',
               cursor: 'move',
-              zIndex: 50,
-              touchAction: 'none', // PENTING: Mengunci scroll HP agar tanda tangan bisa meluncur mulus saat digeser jari
+              zIndex: 99,
+              touchAction: 'none', // Mengunci gulir layar bawaan HP saat jari menggeser TTD
               borderRadius: '4px',
               boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)'
             }}
@@ -254,7 +261,7 @@ export default function SignDocumentPage() {
         )}
       </div>
 
-      {/* FOOTER SIMPAN HASIL AKHIR */}
+      {/* FOOTER AKSI PENYIMPANAN */}
       {isPlaced && (
         <footer style={{ marginTop: '15px', textAlign: 'right' }}>
           <button
@@ -267,7 +274,7 @@ export default function SignDocumentPage() {
         </footer>
       )}
 
-      {/* MODAL KANVAS UTAMA */}
+      {/* MODAL KANVAS TANDA TANGAN */}
       {isModalOpen && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', backgroundColor: 'rgba(0,0,0,0.6)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999 }}>
           <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '12px', width: '92%', maxWidth: '420px' }}>
