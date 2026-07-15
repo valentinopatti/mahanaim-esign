@@ -23,23 +23,25 @@ export default function SignDocumentPage() {
   const [pdfRenderLoading, setPdfRenderLoading] = useState(true);
   const [pdfLoadError, setPdfLoadError] = useState(false);
   
-  // State Halaman PDF Hasil Render
-  const [pdfPages, setPdfPages] = useState([]); // Menyimpan data dimensi setiap halaman
-  const [activePageTarget, setActivePageTarget] = useState(null); // Mengetahui TTD sedang aktif di halaman berapa
+  // State Halaman PDF
+  const [pdfPages, setPdfPages] = useState([]);
+  const [activePageTarget, setActivePageTarget] = useState(null);
 
-  // State Koordinat TTD (Relatif terhadap Halaman Aktif, bukan seluruh dokumen)
+  // State Koordinat Posisi TTD (Persentase)
   const [position, setPosition] = useState({ x: 35, y: 70 });
+  
+  // State Baru: Mengatur Lebar Ukuran TTD (dalam pixel)
+  const [sigWidth, setSigWidth] = useState(115);
 
   // Ref Komponen
   const signatureCanvasRef = useRef(null);
-  const pageContainersRef = useRef([]);
 
   // Pelacak gerakan seret (Drag & Drop)
   const isDragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
   const positionStart = useRef({ x: 35, y: 70 });
 
-  // 1. Ambil Berkas PDF dari Supabase dan Pecah Menjadi Array Halaman Resmi
+  // 1. Ambil Berkas PDF dari Supabase
   useEffect(() => {
     async function loadAndSplitPDF() {
       try {
@@ -59,8 +61,6 @@ export default function SignDocumentPage() {
         const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
         
         const pagesArray = [];
-
-        // Render setiap halaman ke dalam kanvas virtual untuk disimpan ke state komponen React
         for (let i = 1; i <= pdf.numPages; i++) {
           const page = await pdf.getPage(i);
           const viewport = page.getViewport({ scale: 1.3 });
@@ -70,11 +70,10 @@ export default function SignDocumentPage() {
             viewport: viewport
           });
         }
-
         setPdfPages(pagesArray);
         setPdfRenderLoading(false);
       } catch (err) {
-        console.error("Gagal memproses dokumen multi-halaman:", err);
+        console.error("Gagal memproses dokumen:", err);
         setPdfLoadError(true);
         setPdfRenderLoading(false);
       }
@@ -82,9 +81,9 @@ export default function SignDocumentPage() {
     if (id) loadAndSplitPDF();
   }, [id]);
 
-  // 2. Render Kanvas ketika Array Halaman Selesai Dimuat ke DOM
+  // 2. Render Kanvas PDF ke DOM
   useEffect(() => {
-    pdfPages.forEach(async (pageObj, index) => {
+    pdfPages.forEach(async (pageObj) => {
       const canvas = document.getElementById(`pdf-canvas-p-${pageObj.pageNumber}`);
       if (canvas) {
         const context = canvas.getContext('2d');
@@ -142,11 +141,14 @@ export default function SignDocumentPage() {
     const dataUrl = signatureCanvasRef.current.toDataURL('image/png');
     setSignatureImage(dataUrl);
     setIsModalOpen(false);
-    setPosition({ x: 35, y: 70 }); // Reset posisi awal di tengah bawah halaman target agar mudah terlihat
+    setPosition({ x: 35, y: 70 }); 
   };
 
-  // 4. Logika Geser TTD Relatif Terhadap Halaman Pendukung Saja (Sangat Akurat & Ringan)
+  // 4. Logika Geser TTD Relatif Terhadap Halaman
   const handleStart = (e) => {
+    // Abaikan drag jika pengguna sedang menggeser slider pengubah ukuran
+    if (e.target.tagName.toLowerCase() === 'input') return;
+
     isDragging.current = true;
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
@@ -166,17 +168,15 @@ export default function SignDocumentPage() {
 
     const deltaX = clientX - dragStart.current.x;
     const deltaY = clientY - dragStart.current.y;
-    
     const rect = container.getBoundingClientRect();
 
     let newX = positionStart.current.x + (deltaX / rect.width) * 100;
     let newY = positionStart.current.y + (deltaY / rect.height) * 100;
 
-    // Kunci TTD agar tidak bisa keluar dari batas halaman pembungkusnya
     if (newX < 0) newX = 0;
     if (newY < 0) newY = 0;
-    if (newX > 82) newX = 82;
-    if (newY > 94) newY = 94;
+    if (newX > 80) newX = 80;
+    if (newY > 92) newY = 92;
 
     setPosition({ x: newX, y: newY });
   };
@@ -185,7 +185,7 @@ export default function SignDocumentPage() {
     isDragging.current = false;
   };
 
-  // 5. Simpan TTD Bersama Target Halaman Resmi Ke Backend
+  // 5. Simpan TTD dan Lebar Ukurannya ke Backend API
   const handleSubmitSignature = async () => {
     if (!signatureImage || !activePageTarget) return alert("Silakan tempel tanda tangan terlebih dahulu!");
     setLoading(true);
@@ -199,12 +199,13 @@ export default function SignDocumentPage() {
           signatureImage: signatureImage,
           percentX: position.x,
           percentY: position.y,
-          pageNumber: activePageTarget // Mengirim nomor halaman aktual (misal halaman 8) ke backend secara dinamis
+          pageNumber: activePageTarget,
+          signatureWidth: sigWidth // Mengirimkan ukuran lebar kustom ke backend
         })
       });
 
       if (response.ok) {
-        alert(`🎉 Dokumen Berhasil Ditandatangani di Halaman ${activePageTarget}!`);
+        alert(`🎉 Dokumen Berhasil Disimpan di Halaman ${activePageTarget}!`);
         router.push('/documents');
       } else {
         const errData = await response.json();
@@ -226,7 +227,7 @@ export default function SignDocumentPage() {
         </p>
       </header>
 
-      {/* VIEWPORT UTAMA (SCROLLABLE DOKUMEN) */}
+      {/* VIEWPORT SCROLLABLE */}
       <div 
         style={{ 
           border: '2px solid #cbd5e1', 
@@ -240,61 +241,32 @@ export default function SignDocumentPage() {
         }}
       >
         {pdfRenderLoading && (
-          <div style={{ color: '#475569', fontSize: '14px', textAlign: 'center', marginTop: '25vh' }}>⏳ Sedang memisahkan dan memuat dokumen berkas halaman...</div>
+          <div style={{ color: '#475569', fontSize: '14px', textAlign: 'center', marginTop: '25vh' }}>⏳ Sedang memuat halaman dokumen...</div>
         )}
 
-        {pdfLoadError && (
-          <div style={{ color: '#ef4444', textAlign: 'center', padding: '20px', marginTop: '25vh' }}>⚠️ Gagal merender pratinjau halaman PDF.</div>
-        )}
-
-        {/* LOOPING UNTUK MERENDER SETIAP HALAMAN SEBAGAI KOTAK MANDIRI */}
         {!pdfRenderLoading && pdfPages.map((pageObj) => (
-          <div 
-            key={pageObj.pageNumber}
-            style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '25px' }}
-          >
-            {/* Label Informasi Penunjuk Halaman */}
+          <div key={pageObj.pageNumber} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '25px' }}>
+            
             <div style={{ alignSelf: 'flex-start', maxWidth: '650px', width: '100%', margin: '0 auto 6px auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#475569', backgroundColor: '#cbd5e1', padding: '3px 8px', borderRadius: '4px' }}>
                 Halaman {pageObj.pageNumber} dari {pdfPages.length}
               </span>
-              
-              {/* Tombol Tempel TTD Khusus Halaman Ini */}
               <button
                 onClick={() => handleOpenPadForPage(pageObj.pageNumber)}
-                style={{
-                  padding: '5px 12px',
-                  backgroundColor: activePageTarget === pageObj.pageNumber ? '#16a34a' : '#2563eb',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '4px',
-                  fontSize: '11px',
-                  fontWeight: 'bold',
-                  cursor: 'pointer'
-                }}
+                style={{ padding: '5px 12px', backgroundColor: activePageTarget === pageObj.pageNumber ? '#16a34a' : '#2563eb', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
               >
                 {activePageTarget === pageObj.pageNumber ? '✍️ Ubah TTD Halaman Ini' : `📍 Tempel TTD di Hal ${pageObj.pageNumber}`}
               </button>
             </div>
 
-            {/* Kontainer Pembungkus Kanvas Per Halaman */}
+            {/* KOTAK HALAMAN PDF */}
             <div 
               id={`page-wrapper-${pageObj.pageNumber}`}
-              style={{ 
-                position: 'relative', 
-                width: '100%', 
-                maxWidth: '650px',
-                boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-                borderRadius: '4px',
-                backgroundColor: '#ffffff'
-              }}
+              style={{ position: 'relative', width: '100%', maxWidth: '650px', boxShadow: '0 4px 12px rgba(0,0,0,0.15)', borderRadius: '4px', backgroundColor: '#ffffff' }}
             >
-              <canvas 
-                id={`pdf-canvas-p-${pageObj.pageNumber}`} 
-                style={{ width: '100%', height: 'auto', display: 'block', borderRadius: '4px' }} 
-              />
+              <canvas id={`pdf-canvas-p-${pageObj.pageNumber}`} style={{ width: '100%', height: 'auto', display: 'block', borderRadius: '4px' }} />
 
-              {/* Tanda Tangan Akan Muncul Secara Spesifik Hanya di Halaman yang Dipilih */}
+              {/* TANDA TANGAN DENGAN FITUR RESIZE */}
               {activePageTarget === pageObj.pageNumber && signatureImage && (
                 <div
                   onMouseDown={handleStart}
@@ -308,29 +280,43 @@ export default function SignDocumentPage() {
                     position: 'absolute',
                     left: `${position.x}%`,
                     top: `${position.y}%`,
-                    width: '105px',
-                    padding: '4px',
+                    width: `${sigWidth}px`, // Lebar diatur dinamis via state
+                    padding: '6px',
                     border: '2px dashed #16a34a',
-                    backgroundColor: 'rgba(240, 253, 244, 0.9)',
+                    backgroundColor: 'rgba(240, 253, 244, 0.95)',
                     cursor: 'move',
                     zIndex: 99,
                     touchAction: 'none',
-                    borderRadius: '4px'
+                    borderRadius: '6px',
+                    boxShadow: '0 10px 15px -3px rgba(0,0,0,0.2)'
                   }}
                 >
-                  <img src={signatureImage} alt="Signature" style={{ width: '100%', display: 'block', pointerEvents: 'none' }} />
-                  <div style={{ fontSize: '7px', color: '#16a34a', textAlign: 'center', marginTop: '1px', fontWeight: 'bold' }}>👆 Geser di Hal {pageObj.pageNumber}</div>
+                  <img src={signatureImage} alt="Signature" style={{ width: '100%', display: 'block', pointerEvents: 'none', marginBottom: '5px' }} />
+                  
+                  {/* SLIDER PENGUBAH UKURAN (RESIZE) */}
+                  <div style={{ backgroundColor: '#ffffff', padding: '4px', borderRadius: '4px', border: '1px solid #bbf7d0' }} className="nodrag">
+                    <div style={{ fontSize: '8px', color: '#475569', fontWeight: 'bold', marginBottom: '2px', textAlign: 'center' }}>📐 Ukuran TTD:</div>
+                    <input 
+                      type="range" 
+                      min="60" 
+                      max="200" 
+                      value={sigWidth} 
+                      onChange={(e) => setSigWidth(Number(e.target.value))}
+                      style={{ width: '100%', display: 'block', margin: 0, cursor: 'pointer' }}
+                    />
+                  </div>
                 </div>
               )}
             </div>
+
           </div>
         ))}
       </div>
 
-      {/* FOOTER TOMBOL SIMPAN UTAMA */}
+      {/* FOOTER TOMBOL SIMPAN */}
       {signatureImage && activePageTarget && !pdfRenderLoading && (
         <footer style={{ marginTop: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
-          <span style={{ fontSize: '13px', color: '#16a34a', fontWeight: 'bold' }}>📍 TTD Siap Disimpan di Halaman {activePageTarget}</span>
+          <span style={{ fontSize: '13px', color: '#16a34a', fontWeight: 'bold' }}>📍 Gunakan slider di kotak hijau untuk membesarkan/mengecilkan TTD.</span>
           <button
             onClick={handleSubmitSignature}
             disabled={loading}
@@ -341,12 +327,11 @@ export default function SignDocumentPage() {
         </footer>
       )}
 
-      {/* POPUP MODAL PAD UTAMA UNTUK CORET TTD */}
+      {/* POPUP MODAL PAD TTD */}
       {isModalOpen && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', backgroundColor: 'rgba(0,0,0,0.6)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999 }}>
           <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '12px', width: '92%', maxWidth: '420px' }}>
-            <h3 style={{ margin: '0 0 6px 0', fontSize: '15px' }}>Buat TTD untuk Halaman {activePageTarget}</h3>
-            <p style={{ margin: '0 0 12px 0', fontSize: '11px', color: '#666' }}>Goreskan sidik jari atau stylus Anda pada kotak di bawah:</p>
+            <h3 style={{ margin: '0 0 12px 0', fontSize: '15px' }}>Buat TTD untuk Halaman {activePageTarget}</h3>
             <canvas
               ref={signatureCanvasRef}
               width={380}
