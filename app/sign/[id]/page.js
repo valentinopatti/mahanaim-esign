@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { createClient } from '@supabase/supabase-js';
 
-// Inisialisasi Supabase Client Langsung di Frontend
+// Inisialisasi Supabase Client
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://khlpzyyshtuwronalntr.supabase.co';
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
@@ -19,6 +19,7 @@ export default function SignDocumentPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [pdfLoadError, setPdfLoadError] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
 
   // State Posisi Penempatan Tanda Tangan (Persentase 0 - 100%)
   const [position, setPosition] = useState({ x: 15, y: 35 });
@@ -28,12 +29,22 @@ export default function SignDocumentPage() {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
 
-  // Variabel bantuan pelacak gerakan (Desktop & Mobile)
+  // Variabel pelacak gerakan (Desktop & Mobile)
   const isDragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
   const positionStart = useRef({ x: 15, y: 35 });
 
-  // 1. AMBIL DATA DOKUMEN LANGSUNG DARI SUPABASE (Bebas dari Error API 404)
+  // 1. Deteksi otomatis apakah pengguna menggunakan HP atau Laptop
+  useEffect(() => {
+    const checkDevice = () => {
+      const userAgent = navigator.userAgent || navigator.vendor || window.opera;
+      const mobileRegex = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i;
+      setIsMobile(mobileRegex.test(userAgent));
+    };
+    checkDevice();
+  }, []);
+
+  // 2. Ambil data dokumen dari database Supabase
   useEffect(() => {
     async function getDocumentFromSupabase() {
       try {
@@ -44,7 +55,6 @@ export default function SignDocumentPage() {
           .single();
 
         if (error) throw error;
-
         if (data) {
           setDocumentData(data);
         }
@@ -56,7 +66,7 @@ export default function SignDocumentPage() {
     if (id) getDocumentFromSupabase();
   }, [id]);
 
-  // 2. Fungsi Kanvas Coretan Tanda Tangan
+  // 3. Fungsi Kanvas Coreti Tanda Tangan
   let isDrawing = false;
 
   const startDrawing = (e) => {
@@ -106,7 +116,7 @@ export default function SignDocumentPage() {
     setIsPlaced(true);
   };
 
-  // 3. FUNGSI DRAG & DROP MULTI-DEVICE (HP TOUCH & DESKTOP MOUSE)
+  // 4. Fungsi Geser TTD (Mouse Laptop & Sentuhan Jari HP)
   const handleStart = (e) => {
     isDragging.current = true;
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
@@ -129,14 +139,13 @@ export default function SignDocumentPage() {
 
     const containerRect = containerRef.current.getBoundingClientRect();
 
-    // Mengubah pergeseran piksel menjadi persentase (%)
     const deltaPercentX = (deltaX / containerRect.width) * 100;
     const deltaPercentY = (deltaY / containerRect.height) * 100;
 
     let newX = positionStart.current.x + deltaPercentX;
     let newY = positionStart.current.y + deltaPercentY;
 
-    // Kunci batas penempatan tanda tangan agar tidak keluar halaman
+    // Batasi gerakan agar tidak keluar halaman preview
     if (newX < 0) newX = 0;
     if (newY < 0) newY = 0;
     if (newX > 85) newX = 85;
@@ -149,7 +158,7 @@ export default function SignDocumentPage() {
     isDragging.current = false;
   };
 
-  // 4. Kirim Data Hasil Akhir Ke API
+  // 5. Submit TTD ke API Backend
   const handleSubmitSignature = async () => {
     if (!signatureImage) return alert("Silakan tempel tanda tangan terlebih dahulu!");
     setLoading(true);
@@ -175,10 +184,23 @@ export default function SignDocumentPage() {
         alert(`Gagal menyimpan: ${errData.error}`);
       }
     } catch (err) {
-      alert("Terjadi gangguan koneksi sistem.");
+      alert("Terjadi gangguan koneksi.");
     } finally {
       setLoading(false);
     }
+  };
+
+  // Fungsi dinamis menentukan SRC IFrame agar mendukung HP
+  const getIframeSrc = () => {
+    if (!documentData?.file_url) return "";
+    
+    // Jika diakses dari HP, gunakan Google Docs Viewer Embed
+    if (isMobile) {
+      return `https://docs.google.com/gview?url=${encodeURIComponent(documentData.file_url)}&embedded=true`;
+    }
+    
+    // Jika diakses dari Laptop, gunakan penampil PDF bawaan browser
+    return `${documentData.file_url}#toolbar=0`;
   };
 
   return (
@@ -186,7 +208,9 @@ export default function SignDocumentPage() {
       <header style={{ marginBottom: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
         <div>
           <h1 style={{ fontSize: '18px', margin: 0, color: '#1e3a8a' }}>Mahanaim Studio Sign</h1>
-          <p style={{ fontSize: '12px', color: '#666', margin: '2px 0 0 0' }}>Berkas: {documentData?.file_name || 'Memuat dokumen dari database...'}</p>
+          <p style={{ fontSize: '12px', color: '#666', margin: '2px 0 0 0' }}>
+            Berkas: {documentData?.file_name || 'Memuat dokumen...'}
+          </p>
         </div>
         <button 
           onClick={() => setIsModalOpen(true)}
@@ -214,19 +238,19 @@ export default function SignDocumentPage() {
       >
         {pdfLoadError ? (
           <div style={{ color: '#ef4444', textAlign: 'center', padding: '20px' }}>
-            ⚠️ Gagal memuat dokumen. Periksa kembali ID dokumen atau koneksi database Supabase Anda.
+            ⚠️ Gagal memuat dokumen dari Supabase.
           </div>
         ) : documentData?.file_url ? (
           <iframe 
-            src={`${documentData.file_url}#toolbar=0`}
+            src={getIframeSrc()}
             style={{ width: '100%', height: '100%', border: 'none' }}
-            title="Pratinjau Kertas Dokumen"
+            title="Pratinjau Dokumen"
           />
         ) : (
           <div style={{ color: '#666', fontSize: '14px' }}>⏳ Mengunduh berkas dari cloud server...</div>
         )}
 
-        {/* KOTAK TANDA TANGAN (TOUCH DRAG DI HP LOCK) */}
+        {/* KOTAK TANDA TANGAN */}
         {isPlaced && signatureImage && (
           <div
             onMouseDown={handleStart}
@@ -246,7 +270,7 @@ export default function SignDocumentPage() {
               backgroundColor: 'rgba(240, 253, 244, 0.9)',
               cursor: 'move',
               zIndex: 99,
-              touchAction: 'none', // Mengunci gulir layar bawaan HP saat jari menggeser TTD
+              touchAction: 'none', // Mengunci scroll layar HP agar gerakan geser mulus
               borderRadius: '4px',
               boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)'
             }}
