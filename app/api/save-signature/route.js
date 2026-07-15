@@ -47,9 +47,9 @@ export async function POST(request) {
     const ttdWidth = 75; 
     const ttdHeight = 37.5;
 
-    // 4. Kalibrasi Akurat Sumbu Koordinat agar Posisi Pas & Tidak Menimpa Barcode
+    // 4. Kalibrasi Akurat Sumbu Koordinat agar Posisi Pas & Presisi
     let finalX = coordinateX;
-    let finalY = pageHeight - coordinateY; // Rumus kalibrasi agar tanda tangan naik tepat di atas objek seret
+    let finalY = pageHeight - coordinateY - ttdHeight; // Rumus presisi pembalik sumbu Y (atas layar ke bawah PDF)
     let finalRotation = 0;
 
     // Menyesuaikan posisi koordinat jika file PDF asli memiliki metadata rotasi terbalik
@@ -62,7 +62,7 @@ export async function POST(request) {
       finalY = coordinateY;
       finalRotation = 180;
     } else if (pageRotation === 270) {
-      finalX = pageHeight - coordinateY;
+      finalX = pageHeight - coordinateY - ttdHeight;
       finalY = pageWidth - coordinateX - ttdWidth;
       finalRotation = 90;
     }
