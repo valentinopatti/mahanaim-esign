@@ -13,7 +13,18 @@ const supabase = createClient(cleanUrl, supabaseAnonKey);
 export async function POST(request) {
   try {
     // Ambil parameter dari frontend
-    const { documentId, signatureImage, coordinateX, coordinateY, pageNumber, containerWidth, containerHeight } = await request.json();
+    const { 
+      documentId, 
+      signatureImage, 
+      coordinateX, 
+      coordinateY, 
+      pageNumber, 
+      containerWidth, 
+      containerHeight,
+      // Fallback persentase jika dikirim dari frontend versi mobile terbaru
+      percentX, 
+      percentY 
+    } = await request.json();
 
     // 1. Ambil data dokumen dari Supabase
     const { data: docData, error: fetchError } = await supabase
@@ -37,62 +48,65 @@ export async function POST(request) {
     const { width: pageWidth, height: pageHeight } = targetPage.getSize();
     const pageRotation = targetPage.getRotation().angle; 
 
-    // 3. Konversi gambar tanda tangan dan dapatkan ukuran aslinya
+    // 3. Konversi gambar tanda tangan dan kunci aspek rasio
     const sigImageRaw = signatureImage.split(';base64,')[1] || signatureImage;
     const embeddedImage = await pdfDoc.embedPng(Buffer.from(sigImageRaw, 'base64'));
 
-    // --- FITUR ANTI-SKEW (MEMPERTAHANKAN RASIO ASLI) ---
-    // Dapatkan lebar dan tinggi asli dari coretan gambar tanda tangan
-    const originalWidth = embeddedImage.width;
-    const originalHeight = embeddedImage.height;
-
-    // Tentukan lebar tanda tangan yang diinginkan di dokumen PDF (misalnya lebar tetap 85)
-    const ttdWidth = 85; 
-    
-    // Hitung tinggi secara proporsional agar bentuk tanda tangan TIDAK GEPENG/SKEW
-    const aspectRatio = originalHeight / originalWidth;
+    // Tentukan lebar tanda tangan yang aman dan proporsional pada PDF asli (tidak akan membesar di HP)
+    const ttdWidth = pageWidth * 0.15; // Ukuran proporsional: 15% dari lebar kertas PDF asli
+    const aspectRatio = embeddedImage.height / embeddedImage.width;
     const ttdHeight = ttdWidth * aspectRatio;
-    // ----------------------------------------------------
 
-    // 4. Hitung Faktor Skala berdasarkan layar pratinjau dokumen
-    const scaleX = containerWidth ? (pageWidth / containerWidth) : 1;
-    const scaleY = containerHeight ? (pageHeight / containerHeight) : 1;
+    // 4. Kalkulasi Koordinat Pintar (Deteksi otomatis jika dikirim dari HP)
+    let finalX = 0;
+    let finalY = 0;
 
-    // Hitung posisi koordinat murni
-    let calculatedX = coordinateX * scaleX;
-    let calculatedY = pageHeight - (coordinateY * scaleY) - ttdHeight;
+    if (percentX !== undefined && percentY !== undefined) {
+      // Jika frontend sudah mengirimkan format persentase matang
+      finalX = (percentX / 100) * pageWidth;
+      finalY = pageHeight - ((percentY / 100) * pageHeight) - ttdHeight;
+    } else if (containerWidth && containerHeight) {
+      // Jika menggunakan koordinat piksel dinamis (Desktop/HP dengan container pembagi)
+      const ratioX = coordinateX / containerWidth;
+      const ratioY = coordinateY / containerHeight;
+      
+      finalX = ratioX * pageWidth;
+      finalY = pageHeight - (ratioY * pageHeight) - ttdHeight;
+    } else {
+      // Antispasi terakhir jika dimensi container gagal terkirim (Fallback standar)
+      finalX = coordinateX;
+      finalY = pageHeight - coordinateY - ttdHeight;
+    }
 
-    let finalX = calculatedX;
-    let finalY = calculatedY;
     let finalRotation = 0;
 
-    // Menyesuaikan posisi jika dokumen memiliki properti rotasi dari scanner
+    // Menyesuaikan posisi jika dokumen memiliki properti rotasi bawaan scanner
     if (pageRotation === 90) {
-      finalX = calculatedY;
-      finalY = calculatedX;
+      const temp = finalX;
+      finalX = finalY;
+      finalY = temp;
       finalRotation = -90;
     } else if (pageRotation === 180) {
-      finalX = pageWidth - calculatedX - ttdWidth;
-      finalY = calculatedY;
+      finalX = pageWidth - finalX - ttdWidth;
       finalRotation = 180;
     } else if (pageRotation === 270) {
-      finalX = pageHeight - calculatedY - ttdHeight;
-      finalY = pageWidth - calculatedX - ttdWidth;
+      finalX = pageHeight - finalY - ttdHeight;
+      finalY = pageWidth - finalX - ttdWidth;
       finalRotation = 90;
     }
 
-    // Jaga agar tidak melebihi batas tepi halaman PDF
-    if (finalX < 0) finalX = 0;
-    if (finalY < 0) finalY = 0;
-    if (finalX + ttdWidth > pageWidth) finalX = pageWidth - ttdWidth;
-    if (finalY + ttdHeight > pageHeight) finalY = pageHeight - ttdHeight;
+    // PROTEKSI KETAT: Mencegah tanda tangan melompat keluar dari batas kertas PDF
+    if (finalX < 0) finalX = 10;
+    if (finalY < 0) finalY = 10;
+    if (finalX + ttdWidth > pageWidth) finalX = pageWidth - ttdWidth - 10;
+    if (finalY + ttdHeight > pageHeight) finalY = pageHeight - ttdHeight - 10;
 
-    // 5. Cetak gambar tanda tangan secara permanen dengan rasio yang benar
+    // 5. Cetak gambar tanda tangan secara permanen dengan proteksi anti-skew & anti-oversize
     targetPage.drawImage(embeddedImage, {
       x: finalX,
       y: finalY, 
       width: ttdWidth,
-      height: ttdHeight, // Menggunakan tinggi proporsional otomatis (Bebas skew!)
+      height: ttdHeight,
       rotate: degrees(finalRotation),
     });
 
@@ -113,7 +127,7 @@ export async function POST(request) {
       return new Response(JSON.stringify({ error: updateError.message }), { status: 500 });
     }
 
-    // 8. Kirim notifikasi email otomatis
+    // 8. Kirim notifikasi email otomatis via Resend
     try {
       const pdfBuffer = Buffer.from(modifiedPdfBytes);
 
