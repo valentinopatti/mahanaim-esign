@@ -12,7 +12,6 @@ const supabase = createClient(cleanUrl, supabaseAnonKey);
 
 export async function POST(request) {
   try {
-    // Ambil parameter dari frontend
     const { 
       documentId, 
       signatureImage, 
@@ -21,7 +20,6 @@ export async function POST(request) {
       pageNumber, 
       containerWidth, 
       containerHeight,
-      // Fallback persentase jika dikirim dari frontend versi mobile terbaru
       percentX, 
       percentY 
     } = await request.json();
@@ -37,50 +35,53 @@ export async function POST(request) {
       return new Response(JSON.stringify({ error: "Dokumen tidak ditemukan di database" }), { status: 404 });
     }
 
-    // 2. Load berkas PDF ke memory mesin pdf-lib
+    // 2. Load berkas PDF ke memory
     const pdfBase64Raw = docData.file_url.split(';base64,')[1] || docData.file_url;
     const pdfDoc = await PDFDocument.load(Buffer.from(pdfBase64Raw, 'base64'));
 
     const pages = pdfDoc.getPages();
     const targetPage = pages[pageNumber - 1];
     
-    // Dapatkan dimensi asli kertas PDF (Absolut)
+    // Dapatkan dimensi asli kertas PDF
     const { width: pageWidth, height: pageHeight } = targetPage.getSize();
     const pageRotation = targetPage.getRotation().angle; 
 
-    // 3. Konversi gambar tanda tangan dan kunci aspek rasio
+    // 3. Konversi gambar tanda tangan
     const sigImageRaw = signatureImage.split(';base64,')[1] || signatureImage;
     const embeddedImage = await pdfDoc.embedPng(Buffer.from(sigImageRaw, 'base64'));
 
-    // Tentukan lebar tanda tangan yang aman dan proporsional pada PDF asli (tidak akan membesar di HP)
-    const ttdWidth = pageWidth * 0.15; // Ukuran proporsional: 15% dari lebar kertas PDF asli
+    // --- UKURAN TANDA TANGAN IDEAL & PROPORSIONAL (ANTI RAKSASA) ---
+    // Mengunci lebar tanda tangan sebesar 12% dari lebar kertas PDF agar pas untuk kolom kecil
+    const ttdWidth = pageWidth * 0.12; 
     const aspectRatio = embeddedImage.height / embeddedImage.width;
     const ttdHeight = ttdWidth * aspectRatio;
 
-    // 4. Kalkulasi Koordinat Pintar (Deteksi otomatis jika dikirim dari HP)
+    // 4. KALKULASI ABSOLUT BERBASIS PERSENTASE
     let finalX = 0;
     let finalY = 0;
 
+    // Jika frontend mengirimkan hitungan persentase murni
     if (percentX !== undefined && percentY !== undefined) {
-      // Jika frontend sudah mengirimkan format persentase matang
       finalX = (percentX / 100) * pageWidth;
       finalY = pageHeight - ((percentY / 100) * pageHeight) - ttdHeight;
-    } else if (containerWidth && containerHeight) {
-      // Jika menggunakan koordinat piksel dinamis (Desktop/HP dengan container pembagi)
-      const ratioX = coordinateX / containerWidth;
-      const ratioY = coordinateY / containerHeight;
+    } 
+    // Jika frontend mengirim koordinat pixel konvensional
+    else if (containerWidth && containerHeight) {
+      const calcPercentX = (coordinateX / containerWidth);
+      const calcPercentY = (coordinateY / containerHeight);
       
-      finalX = ratioX * pageWidth;
-      finalY = pageHeight - (ratioY * pageHeight) - ttdHeight;
-    } else {
-      // Antispasi terakhir jika dimensi container gagal terkirim (Fallback standar)
+      finalX = calcPercentX * pageWidth;
+      finalY = pageHeight - (calcPercentY * pageHeight) - ttdHeight;
+    } 
+    // Fallback darurat
+    else {
       finalX = coordinateX;
       finalY = pageHeight - coordinateY - ttdHeight;
     }
 
     let finalRotation = 0;
 
-    // Menyesuaikan posisi jika dokumen memiliki properti rotasi bawaan scanner
+    // Koreksi rotasi otomatis dari pemindai kertas
     if (pageRotation === 90) {
       const temp = finalX;
       finalX = finalY;
@@ -95,13 +96,13 @@ export async function POST(request) {
       finalRotation = 90;
     }
 
-    // PROTEKSI KETAT: Mencegah tanda tangan melompat keluar dari batas kertas PDF
-    if (finalX < 0) finalX = 10;
-    if (finalY < 0) finalY = 10;
-    if (finalX + ttdWidth > pageWidth) finalX = pageWidth - ttdWidth - 10;
-    if (finalY + ttdHeight > pageHeight) finalY = pageHeight - ttdHeight - 10;
+    // Batasi ketat koordinat agar tidak keluar kertas
+    if (finalX < 5) finalX = 5;
+    if (finalY < 5) finalY = 5;
+    if (finalX + ttdWidth > pageWidth) finalX = pageWidth - ttdWidth - 5;
+    if (finalY + ttdHeight > pageHeight) finalY = pageHeight - ttdHeight - 5;
 
-    // 5. Cetak gambar tanda tangan secara permanen dengan proteksi anti-skew & anti-oversize
+    // 5. Cetak gambar tanda tangan secara permanen
     targetPage.drawImage(embeddedImage, {
       x: finalX,
       y: finalY, 
@@ -127,10 +128,9 @@ export async function POST(request) {
       return new Response(JSON.stringify({ error: updateError.message }), { status: 500 });
     }
 
-    // 8. Kirim notifikasi email otomatis via Resend
+    // 8. Kirim notifikasi email via Resend
     try {
       const pdfBuffer = Buffer.from(modifiedPdfBytes);
-
       await resend.emails.send({
         from: 'Mahanaim E-Sign <onboarding@resend.dev>',
         to: 'valentino.mahanaim@gmail.com',
@@ -141,23 +141,8 @@ export async function POST(request) {
             <p>Halo Pak Valentino,</p>
             <p>Dokumen Anda telah berhasil ditandatangani secara resmi.</p>
             <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;" />
-            <table style="width: 100%; border-collapse: collapse;">
-              <tr>
-                <td style="padding: 8px 0; font-weight: bold; width: 150px;">Nama Berkas:</td>
-                <td style="padding: 8px 0;">${docData.file_name}</td>
-              </tr>
-              <tr>
-                <td style="padding: 8px 0; font-weight: bold;">Penandatangan:</td>
-                <td style="padding: 8px 0;">${docData.signer_name} (${docData.signer_email})</td>
-              </tr>
-              <tr>
-                <td style="padding: 8px 0; font-weight: bold;">Status:</td>
-                <td style="padding: 8px 0; color: #16a34a; font-weight: bold;">SIGNED (SELESAI)</td>
-              </tr>
-            </table>
-            <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;" />
             <p style="font-size: 13px; color: #444; background-color: #f0fdf4; padding: 10px; border-left: 4px solid #16a34a;">
-              ℹ️ <strong>Informasi Lampiran:</strong> Berkas PDF hasil akhir yang sudah dibubuhi tanda tangan fisik telah disematkan langsung di bagian bawah email ini.
+              ℹ️ Berkas PDF hasil akhir yang sudah dibubuhi tanda tangan fisik telah disematkan langsung di bagian bawah email ini.
             </p>
           </div>
         `,
