@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, degrees } from 'pdf-lib'; // Menambahkan import degrees untuk rotasi
 import { Resend } from 'resend';
 
 // Membaca dari Environment Variable (Aman dari robot pemindai GitHub)
@@ -27,22 +27,51 @@ export async function POST(request) {
     const pdfBase64Raw = docData.file_url.split(';base64,')[1] || docData.file_url;
     const pdfDoc = await PDFDocument.load(Buffer.from(pdfBase64Raw, 'base64'));
 
-    const sigImageRaw = signatureImage.split(';base64,')[1] || signatureImage;
-    const embeddedImage = await pdfDoc.embedPng(Buffer.from(sigImageRaw, 'base64'));
-
     const pages = pdfDoc.getPages();
     const targetPage = pages[pageNumber - 1];
     
-    const { height: pageHeight } = targetPage.getSize();
+    // 1. Dapatkan ukuran asli halaman PDF
+    const { width: pageWidth, height: pageHeight } = targetPage.getSize();
     
+    // 2. Deteksi apakah PDF asli memiliki properti rotasi internal (misal dari scanner)
+    const pageRotation = targetPage.getRotation().angle; // Mengembalikan angka sudut 0, 90, 180, atau 270
+
+    // 3. Konversi gambar tanda tangan biner
+    const sigImageRaw = signatureImage.split(';base64,')[1] || signatureImage;
+    const embeddedImage = await pdfDoc.embedPng(Buffer.from(sigImageRaw, 'base64'));
+
+    // Tentukan ukuran tanda tangan yang proporsional
     const ttdWidth = 75; 
     const ttdHeight = 37.5;
 
+    // 4. Kalkulasi penempatan koordinat & rotasi yang adaptif
+    let finalX = coordinateX;
+    let finalY = pageHeight - coordinateY - ttdHeight; // Default rumus pembalik sumbu Y (atas ke bawah)
+    let finalRotation = 0;
+
+    // Jika PDF asli terdeteksi terotasi secara internal oleh scanner
+    if (pageRotation === 90) {
+      // Jika dokumen diputar 90 derajat searah jarum jam:
+      finalX = coordinateY;
+      finalY = coordinateX;
+      finalRotation = -90; // Putar balik tanda tangan agar sejajar dengan orientasi kertas
+    } else if (pageRotation === 180) {
+      finalX = pageWidth - coordinateX - ttdWidth;
+      finalY = coordinateY;
+      finalRotation = 180;
+    } else if (pageRotation === 270) {
+      finalX = pageHeight - coordinateY - ttdHeight;
+      finalY = pageWidth - coordinateX - ttdWidth;
+      finalRotation = 90;
+    }
+
+    // 5. Gambar tanda tangan secara presisi dengan rotasi yang sesuai
     targetPage.drawImage(embeddedImage, {
-      x: coordinateX,
-      y: pageHeight - coordinateY - ttdHeight, 
+      x: finalX,
+      y: finalY, 
       width: ttdWidth,
       height: ttdHeight,
+      rotate: degrees(finalRotation), // Memastikan tanda tangan tegak lurus mengikuti mata pembaca
     });
 
     const modifiedPdfBytes = await pdfDoc.save();
