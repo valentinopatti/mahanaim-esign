@@ -3,8 +3,11 @@
 import { useState, useRef, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { createClient } from '@supabase/supabase-js';
+import * as pdfjsLib from 'pdfjs-dist';
 
-// Inisialisasi Supabase Client
+// Mengatur worker internal PDFJS menggunakan CDN unpkg resmi
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://khlpzyyshtuwronalntr.supabase.co';
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
@@ -13,41 +16,33 @@ export default function SignDocumentPage() {
   const { id } = useParams();
   const router = useRouter();
 
-  // State Utama
+  // State Manajemen Dokumen
   const [documentData, setDocumentData] = useState(null);
   const [signatureImage, setSignatureImage] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [pdfRenderLoading, setPdfRenderLoading] = useState(true);
   const [pdfLoadError, setPdfLoadError] = useState(false);
-  const [isMobile, setIsMobile] = useState(false);
 
   // State Posisi Penempatan Tanda Tangan (Persentase 0 - 100%)
-  const [position, setPosition] = useState({ x: 15, y: 35 });
+  const [position, setPosition] = useState({ x: 20, y: 40 });
   const [isPlaced, setIsPlaced] = useState(false);
 
   // Ref Komponen Utama
-  const canvasRef = useRef(null);
+  const signatureCanvasRef = useRef(null);
+  const pdfCanvasRef = useRef(null);
   const containerRef = useRef(null);
 
-  // Variabel pelacak gerakan (Desktop & Mobile)
+  // Pelacak gerakan seret (Drag & Drop)
   const isDragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
-  const positionStart = useRef({ x: 15, y: 35 });
+  const positionStart = useRef({ x: 20, y: 40 });
 
-  // 1. Deteksi otomatis apakah pengguna menggunakan HP atau Laptop
+  // 1. Ambil Data Dokumen dan Render PDF ke Kanvas Gambar secara Lokal
   useEffect(() => {
-    const checkDevice = () => {
-      const userAgent = navigator.userAgent || navigator.vendor || window.opera;
-      const mobileRegex = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i;
-      setIsMobile(mobileRegex.test(userAgent));
-    };
-    checkDevice();
-  }, []);
-
-  // 2. Ambil data dokumen dari database Supabase
-  useEffect(() => {
-    async function getDocumentFromSupabase() {
+    async function fetchAndRenderPDF() {
       try {
+        setPdfRenderLoading(true);
         const { data, error } = await supabase
           .from('documents')
           .select('id, file_name, file_url')
@@ -55,38 +50,63 @@ export default function SignDocumentPage() {
           .single();
 
         if (error) throw error;
-        if (data) {
-          setDocumentData(data);
+        if (!data || !data.file_url) throw new Error("File URL tidak ditemukan");
+        
+        setDocumentData(data);
+
+        // Unduh berkas PDF sebagai blob data biner langsung ke memori lokal browser
+        const response = await fetch(data.file_url);
+        const blob = await response.blob();
+        const arrayBuffer = await blob.arrayBuffer();
+
+        // Muat dokumen biner menggunakan PDFJS
+        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        
+        // Ambil halaman pertama untuk pratinjau tanda tangan
+        const page = await pdf.getPage(1);
+        
+        // Sesuaikan skala penampil agar tajam dan pas di dalam box kontainer
+        const viewport = page.getViewport({ scale: 1.5 });
+        const canvas = pdfCanvasRef.current;
+        if (canvas) {
+          const context = canvas.getContext('2d');
+          canvas.height = viewport.height;
+          canvas.width = viewport.width;
+
+          const renderContext = {
+            canvasContext: context,
+            viewport: viewport,
+          };
+          await page.render(renderContext).promise;
         }
+        setPdfRenderLoading(false);
       } catch (err) {
-        console.error("Gagal mengambil data dari Supabase:", err);
+        console.error("Gagal merender berkas PDF halaman pertama:", err);
         setPdfLoadError(true);
+        setPdfRenderLoading(false);
       }
     }
-    if (id) getDocumentFromSupabase();
+
+    if (id) fetchAndRenderPDF();
   }, [id]);
 
-  // 3. Fungsi Kanvas Coretan Tanda Tangan
+  // 2. Logika Coretan Papan Tanda Tangan (Modal Canvas)
   let isDrawing = false;
-
   const startDrawing = (e) => {
     isDrawing = true;
     draw(e);
   };
-
   const stopDrawing = () => {
     isDrawing = false;
-    if (canvasRef.current) {
-      const ctx = canvasRef.current.getContext('2d');
-      ctx.beginPath();
+    if (signatureCanvasRef.current) {
+      signatureCanvasRef.current.getContext('2d').beginPath();
     }
   };
-
   const draw = (e) => {
-    if (!isDrawing || !canvasRef.current) return;
-    const canvas = canvasRef.current;
+    if (!isDrawing || !signatureCanvasRef.current) return;
+    const canvas = signatureCanvasRef.current;
     const ctx = canvas.getContext('2d');
-
     ctx.lineWidth = 3;
     ctx.lineCap = 'round';
     ctx.strokeStyle = '#000000';
@@ -102,50 +122,41 @@ export default function SignDocumentPage() {
   };
 
   const clearCanvas = () => {
-    if (!canvasRef.current) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!signatureCanvasRef.current) return;
+    const canvas = signatureCanvasRef.current;
+    canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
   };
 
   const saveCanvasImage = () => {
-    if (!canvasRef.current) return;
-    const dataUrl = canvasRef.current.toDataURL('image/png');
+    if (!signatureCanvasRef.current) return;
+    const dataUrl = signatureCanvasRef.current.toDataURL('image/png');
     setSignatureImage(dataUrl);
     setIsModalOpen(false);
     setIsPlaced(true);
   };
 
-  // 4. Fungsi Geser TTD (Mouse Laptop & Sentuhan Jari HP)
+  // 3. Logika Geser TTD Multi-Device (Mouse Laptop & Sentuhan Jari HP)
   const handleStart = (e) => {
     isDragging.current = true;
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-
     dragStart.current = { x: clientX, y: clientY };
     positionStart.current = { ...position };
-
     if (e.cancelable) e.preventDefault();
   };
 
   const handleMove = (e) => {
     if (!isDragging.current || !containerRef.current) return;
-
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
 
     const deltaX = clientX - dragStart.current.x;
     const deltaY = clientY - dragStart.current.y;
-
     const containerRect = containerRef.current.getBoundingClientRect();
 
-    const deltaPercentX = (deltaX / containerRect.width) * 100;
-    const deltaPercentY = (deltaY / containerRect.height) * 100;
+    let newX = positionStart.current.x + (deltaX / containerRect.width) * 100;
+    let newY = positionStart.current.y + (deltaY / containerRect.height) * 100;
 
-    let newX = positionStart.current.x + deltaPercentX;
-    let newY = positionStart.current.y + deltaPercentY;
-
-    // Batasi gerakan agar tidak keluar halaman preview
     if (newX < 0) newX = 0;
     if (newY < 0) newY = 0;
     if (newX > 85) newX = 85;
@@ -158,9 +169,9 @@ export default function SignDocumentPage() {
     isDragging.current = false;
   };
 
-  // 5. Submit TTD ke API Backend
+  // 4. Kirim Data Koordinat Posisi Akhir Ke Backend
   const handleSubmitSignature = async () => {
-    if (!signatureImage) return alert("Silakan tempel tanda tangan terlebih dahulu!");
+    if (!signatureImage) return alert("Silakan buat tanda tangan terlebih dahulu!");
     setLoading(true);
 
     try {
@@ -184,23 +195,10 @@ export default function SignDocumentPage() {
         alert(`Gagal menyimpan: ${errData.error}`);
       }
     } catch (err) {
-      alert("Terjadi gangguan koneksi.");
+      alert("Terjadi gangguan koneksi jaringan.");
     } finally {
       setLoading(false);
     }
-  };
-
-  // Menentukan sumber iframe berdasarkan jenis perangkat
-  const getIframeSrc = () => {
-    if (!documentData?.file_url) return "";
-    
-    // Jika diakses menggunakan HP, gunakan Google Docs Viewer API
-    if (isMobile) {
-      return `https://docs.google.com/gview?url=${encodeURIComponent(documentData.file_url)}&embedded=true`;
-    }
-    
-    // Jika diakses dari Laptop, gunakan penampil PDF bawaan browser
-    return `${documentData.file_url}#toolbar=0`;
   };
 
   return (
@@ -208,9 +206,7 @@ export default function SignDocumentPage() {
       <header style={{ marginBottom: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
         <div>
           <h1 style={{ fontSize: '18px', margin: 0, color: '#1e3a8a' }}>Mahanaim Studio Sign</h1>
-          <p style={{ fontSize: '12px', color: '#666', margin: '2px 0 0 0' }}>
-            Berkas: {documentData?.file_name || 'Memuat dokumen...'}
-          </p>
+          <p style={{ fontSize: '12px', color: '#666', margin: '2px 0 0 0' }}>Berkas: {documentData?.file_name || 'Memuat berkas...'}</p>
         </div>
         <button 
           onClick={() => setIsModalOpen(true)}
@@ -220,38 +216,38 @@ export default function SignDocumentPage() {
         </button>
       </header>
 
-      {/* BOX AREA PRATINJAU UTAMA */}
+      {/* KOTAK VIEWPORT UTAMA PREVIEW */}
       <div 
         ref={containerRef} 
         style={{ 
           position: 'relative', 
           border: '2px solid #cbd5e1', 
           borderRadius: '8px', 
-          backgroundColor: '#ffffff', 
+          backgroundColor: '#f1f5f9', 
           width: '100%', 
-          height: '75vh',
-          overflow: 'hidden',
+          height: '70vh',
+          overflow: 'auto',
           display: 'flex',
           justifyContent: 'center',
-          alignItems: 'center'
+          alignItems: 'flex-start',
+          padding: '10px'
         }}
       >
-        {pdfLoadError ? (
-          <div style={{ color: '#ef4444', textAlign: 'center', padding: '20px' }}>
-            ⚠️ Gagal memuat dokumen dari Supabase.
-          </div>
-        ) : documentData?.file_url ? (
-          <iframe 
-            src={getIframeSrc()}
-            style={{ width: '100%', height: '100%', border: 'none' }}
-            title="Pratinjau Dokumen"
-          />
-        ) : (
-          <div style={{ color: '#666', fontSize: '14px' }}>⏳ Mengunduh berkas dari cloud server...</div>
+        {pdfRenderLoading && (
+          <div style={{ color: '#475569', fontSize: '14px', alignSelf: 'center' }}>⏳ Sistem sedang merender halaman dokumen secara langsung...</div>
         )}
 
-        {/* KOTAK TANDA TANGAN */}
-        {isPlaced && signatureImage && (
+        {pdfLoadError && (
+          <div style={{ color: '#ef4444', textAlign: 'center', padding: '20px', alignSelf: 'center' }}>
+            ⚠️ Gagal memuat pratinjau PDF. Pastikan file tersimpan dengan benar di Supabase.
+          </div>
+        )}
+
+        {/* KANVAS PDF UTAMA YANG AKAN DI-RENDER */}
+        <canvas ref={pdfCanvasRef} style={{ maxWidth: '100%', height: 'auto', display: pdfRenderLoading ? 'none' : 'block', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }} />
+
+        {/* KOTAK ELEMEN TANDA TANGAN DI ATAS KANVAS */}
+        {isPlaced && signatureImage && !pdfRenderLoading && (
           <div
             onMouseDown={handleStart}
             onMouseMove={handleMove}
@@ -264,29 +260,24 @@ export default function SignDocumentPage() {
               position: 'absolute',
               left: `${position.x}%`,
               top: `${position.y}%`,
-              width: '110px',
-              padding: '5px',
+              width: '105px',
+              padding: '4px',
               border: '2px dashed #16a34a',
-              backgroundColor: 'rgba(240, 253, 244, 0.9)',
+              backgroundColor: 'rgba(240, 253, 244, 0.85)',
               cursor: 'move',
               zIndex: 99,
-              touchAction: 'none', // Mengunci scroll layar HP agar gerakan geser mulus
-              borderRadius: '4px',
-              boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)'
+              touchAction: 'none', // Cegah layar bergulir naik-turun saat jari menyeret TTD
+              borderRadius: '4px'
             }}
           >
-            <img 
-              src={signatureImage} 
-              alt="Coretan fisik" 
-              style={{ width: '100%', display: 'block', pointerEvents: 'none' }} 
-            />
-            <div style={{ fontSize: '8px', color: '#16a34a', textAlign: 'center', marginTop: '3px', fontWeight: 'bold' }}>👆 Geser Atur Posisi</div>
+            <img src={signatureImage} alt="Signature" style={{ width: '100%', display: 'block', pointerEvents: 'none' }} />
+            <div style={{ fontSize: '8px', color: '#16a34a', textAlign: 'center', marginTop: '2px', fontWeight: 'bold' }}>👆 Geser Posisi</div>
           </div>
         )}
       </div>
 
-      {/* FOOTER AKSI PENYIMPANAN */}
-      {isPlaced && (
+      {/* FOOTER TOMBOL AKSI SIMPAN */}
+      {isPlaced && !pdfRenderLoading && (
         <footer style={{ marginTop: '15px', textAlign: 'right' }}>
           <button
             onClick={handleSubmitSignature}
@@ -298,13 +289,13 @@ export default function SignDocumentPage() {
         </footer>
       )}
 
-      {/* MODAL KANVAS TANDA TANGAN */}
+      {/* POPUP MODAL KANVAS CORETAN TANDA TANGAN */}
       {isModalOpen && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', backgroundColor: 'rgba(0,0,0,0.6)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999 }}>
           <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '12px', width: '92%', maxWidth: '420px' }}>
             <h3 style={{ margin: '0 0 12px 0', fontSize: '16px' }}>Goreskan Tanda Tangan</h3>
             <canvas
-              ref={canvasRef}
+              ref={signatureCanvasRef}
               width={380}
               height={180}
               onMouseDown={startDrawing}
