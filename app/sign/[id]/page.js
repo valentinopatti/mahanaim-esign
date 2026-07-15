@@ -16,31 +16,32 @@ export default function SignDocumentPage() {
   const { id } = useParams();
   const router = useRouter();
 
-  // State Manajemen Dokumen
+  // State Dokumen & Kontrol Rendering
   const [documentData, setDocumentData] = useState(null);
   const [signatureImage, setSignatureImage] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [pdfRenderLoading, setPdfRenderLoading] = useState(true);
   const [pdfLoadError, setPdfLoadError] = useState(false);
+  const [totalPages, setTotalPages] = useState(0);
 
-  // State Posisi Penempatan Tanda Tangan (Persentase 0 - 100%)
-  const [position, setPosition] = useState({ x: 20, y: 40 });
+  // State Posisi Penempatan Tanda Tangan (Persentase 0 - 100% terhadap kontainer utama)
+  const [position, setPosition] = useState({ x: 40, y: 80 });
   const [isPlaced, setIsPlaced] = useState(false);
 
   // Ref Komponen Utama
   const signatureCanvasRef = useRef(null);
-  const pdfCanvasRef = useRef(null);
   const containerRef = useRef(null);
+  const pagesContainerRef = useRef(null);
 
   // Pelacak gerakan seret (Drag & Drop)
   const isDragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
-  const positionStart = useRef({ x: 20, y: 40 });
+  const positionStart = useRef({ x: 40, y: 80 });
 
-  // 1. Ambil Data Dokumen dan Render PDF ke Kanvas Gambar secara Lokal
+  // Ambil Data Dokumen dan Render Seluruh Halaman PDF ke Kanvas Gambar secara Berurutan
   useEffect(() => {
-    async function fetchAndRenderPDF() {
+    async function fetchAndRenderAllPages() {
       try {
         setPdfRenderLoading(true);
         const { data, error } = await supabase
@@ -54,7 +55,7 @@ export default function SignDocumentPage() {
         
         setDocumentData(data);
 
-        // Unduh berkas PDF sebagai blob data biner langsung ke memori lokal browser
+        // Unduh berkas PDF ke memori lokal browser
         const response = await fetch(data.file_url);
         const blob = await response.blob();
         const arrayBuffer = await blob.arrayBuffer();
@@ -63,35 +64,57 @@ export default function SignDocumentPage() {
         const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
         const pdf = await loadingTask.promise;
         
-        // Ambil halaman pertama untuk pratinjau tanda tangan
-        const page = await pdf.getPage(1);
+        setTotalPages(pdf.numPages);
         
-        // Sesuaikan skala penampil agar tajam dan pas di dalam box kontainer
-        const viewport = page.getViewport({ scale: 1.5 });
-        const canvas = pdfCanvasRef.current;
-        if (canvas) {
-          const context = canvas.getContext('2d');
+        // Bersihkan kontainer halaman sebelum merender ulang
+        if (pagesContainerRef.current) {
+          pagesContainerRef.current.innerHTML = '';
+        }
+
+        // Loop untuk merender seluruh halaman dari 1 sampai selesai (Scrollable)
+        for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+          const page = await pdf.getPage(pageNum);
+          
+          // Skala 1.3 - 1.5 agar teks tajam saat di-zoom di layar HP
+          const viewport = page.getViewport({ scale: 1.3 });
+          
+          const canvas = document.createElement('canvas');
+          canvas.style.display = 'block';
+          canvas.style.width = '100%';
+          canvas.style.height = 'auto';
+          canvas.style.marginBottom = '15px';
+          canvas.style.boxShadow = '0 4px 10px rgba(0,0,0,0.15)';
+          canvas.style.borderRadius = '4px';
+          canvas.style.backgroundColor = '#ffffff';
+          
           canvas.height = viewport.height;
           canvas.width = viewport.width;
 
+          const context = canvas.getContext('2d');
           const renderContext = {
             canvasContext: context,
             viewport: viewport,
           };
+          
           await page.render(renderContext).promise;
+          
+          if (pagesContainerRef.current) {
+            pagesContainerRef.current.appendChild(canvas);
+          }
         }
+        
         setPdfRenderLoading(false);
       } catch (err) {
-        console.error("Gagal merender berkas PDF halaman pertama:", err);
+        console.error("Gagal merender seluruh halaman berkas PDF:", err);
         setPdfLoadError(true);
         setPdfRenderLoading(false);
       }
     }
 
-    if (id) fetchAndRenderPDF();
+    if (id) fetchAndRenderAllPages();
   }, [id]);
 
-  // 2. Logika Coretan Papan Tanda Tangan (Modal Canvas)
+  // Logika Coretan Papan Tanda Tangan (Modal Canvas)
   let isDrawing = false;
   const startDrawing = (e) => {
     isDrawing = true;
@@ -135,7 +158,7 @@ export default function SignDocumentPage() {
     setIsPlaced(true);
   };
 
-  // 3. Logika Geser TTD Multi-Device (Mouse Laptop & Sentuhan Jari HP)
+  // Logika Geser TTD Multi-Device (Mouse Laptop & Sentuhan Jari HP)
   const handleStart = (e) => {
     isDragging.current = true;
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
@@ -152,15 +175,20 @@ export default function SignDocumentPage() {
 
     const deltaX = clientX - dragStart.current.x;
     const deltaY = clientY - dragStart.current.y;
-    const containerRect = containerRef.current.getBoundingClientRect();
+    
+    // Hitung pergeseran berdasarkan dimensi scroll total elemen penampung utama
+    const container = containerRef.current;
+    const containerWidth = container.clientWidth;
+    const containerHeight = container.scrollHeight;
 
-    let newX = positionStart.current.x + (deltaX / containerRect.width) * 100;
-    let newY = positionStart.current.y + (deltaY / containerRect.height) * 100;
+    let newX = positionStart.current.x + (deltaX / containerWidth) * 100;
+    let newY = positionStart.current.y + (deltaY / containerHeight) * 100;
 
+    // Batasi pergerakan agar tidak lepas dari dokumen web
     if (newX < 0) newX = 0;
     if (newY < 0) newY = 0;
-    if (newX > 85) newX = 85;
-    if (newY > 92) newY = 92;
+    if (newX > 88) newX = 88;
+    if (newY > 98) newY = 98;
 
     setPosition({ x: newX, y: newY });
   };
@@ -169,7 +197,7 @@ export default function SignDocumentPage() {
     isDragging.current = false;
   };
 
-  // 4. Kirim Data Koordinat Posisi Akhir Ke Backend
+  // Kirim Hasil Akhir Ke Backend API
   const handleSubmitSignature = async () => {
     if (!signatureImage) return alert("Silakan buat tanda tangan terlebih dahulu!");
     setLoading(true);
@@ -183,7 +211,7 @@ export default function SignDocumentPage() {
           signatureImage: signatureImage,
           percentX: position.x,
           percentY: position.y,
-          pageNumber: 1
+          pageNumber: 1 // Koordinat Y yang memanjang otomatis akan terkonversi ke halaman yang dituju
         })
       });
 
@@ -206,7 +234,9 @@ export default function SignDocumentPage() {
       <header style={{ marginBottom: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
         <div>
           <h1 style={{ fontSize: '18px', margin: 0, color: '#1e3a8a' }}>Mahanaim Studio Sign</h1>
-          <p style={{ fontSize: '12px', color: '#666', margin: '2px 0 0 0' }}>Berkas: {documentData?.file_name || 'Memuat berkas...'}</p>
+          <p style={{ fontSize: '12px', color: '#666', margin: '2px 0 0 0' }}>
+            Berkas: {documentData?.file_name || 'Memuat berkas...'} {totalPages > 0 && `(${totalPages} Halaman)`}
+          </p>
         </div>
         <button 
           onClick={() => setIsModalOpen(true)}
@@ -216,37 +246,38 @@ export default function SignDocumentPage() {
         </button>
       </header>
 
-      {/* KOTAK VIEWPORT UTAMA PREVIEW */}
+      {/* KOTAK VIEWPORT UTAMA PREVIEW (BISA DI-SCROLL DENGAN BEBAS) */}
       <div 
         ref={containerRef} 
         style={{ 
           position: 'relative', 
           border: '2px solid #cbd5e1', 
           borderRadius: '8px', 
-          backgroundColor: '#f1f5f9', 
+          backgroundColor: '#e2e8f0', 
           width: '100%', 
-          height: '70vh',
-          overflow: 'auto',
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'flex-start',
-          padding: '10px'
+          height: '75vh',
+          overflowY: 'auto', // Mengaktifkan scroll vertikal
+          overflowX: 'hidden',
+          padding: '15px 10px',
+          WebkitOverflowScrolling: 'touch' // Menjadikan scroll di HP super mulus/smooth
         }}
       >
         {pdfRenderLoading && (
-          <div style={{ color: '#475569', fontSize: '14px', alignSelf: 'center' }}>⏳ Sistem sedang merender halaman dokumen secara langsung...</div>
+          <div style={{ color: '#475569', fontSize: '14px', textAlign: 'center', marginTop: '20vh' }}>
+            ⏳ Sedang merender seluruh halaman dokumen ({totalPages || '...'} Halaman)...
+          </div>
         )}
 
         {pdfLoadError && (
-          <div style={{ color: '#ef4444', textAlign: 'center', padding: '20px', alignSelf: 'center' }}>
+          <div style={{ color: '#ef4444', textAlign: 'center', padding: '20px', marginTop: '20vh' }}>
             ⚠️ Gagal memuat pratinjau PDF. Pastikan file tersimpan dengan benar di Supabase.
           </div>
         )}
 
-        {/* KANVAS PDF UTAMA YANG AKAN DI-RENDER */}
-        <canvas ref={pdfCanvasRef} style={{ maxWidth: '100%', height: 'auto', display: pdfRenderLoading ? 'none' : 'block', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }} />
+        {/* KONTAINER UTAMA TEMPAT DERETAN KANVAS PDF BERURUTAN */}
+        <div ref={pagesContainerRef} style={{ width: '100%', maxWidth: '650px', margin: '0 auto' }} />
 
-        {/* KOTAK ELEMEN TANDA TANGAN DI ATAS KANVAS */}
+        {/* KOTAK ELEMEN TANDA TANGAN DI ATAS KANVAS BERHARI-HARI */}
         {isPlaced && signatureImage && !pdfRenderLoading && (
           <div
             onMouseDown={handleStart}
@@ -260,25 +291,27 @@ export default function SignDocumentPage() {
               position: 'absolute',
               left: `${position.x}%`,
               top: `${position.y}%`,
-              width: '105px',
+              width: '115px',
               padding: '4px',
               border: '2px dashed #16a34a',
-              backgroundColor: 'rgba(240, 253, 244, 0.85)',
+              backgroundColor: 'rgba(240, 253, 244, 0.92)',
               cursor: 'move',
-              zIndex: 99,
-              touchAction: 'none', // Cegah layar bergulir naik-turun saat jari menyeret TTD
-              borderRadius: '4px'
+              zIndex: 999,
+              touchAction: 'none', // Sangat penting: Mencegah layar ikut ter-scroll saat jari menyeret TTD
+              borderRadius: '4px',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
             }}
           >
             <img src={signatureImage} alt="Signature" style={{ width: '100%', display: 'block', pointerEvents: 'none' }} />
-            <div style={{ fontSize: '8px', color: '#16a34a', textAlign: 'center', marginTop: '2px', fontWeight: 'bold' }}>👆 Geser Posisi</div>
+            <div style={{ fontSize: '8px', color: '#16a34a', textAlign: 'center', marginTop: '2px', fontWeight: 'bold' }}>👆 Seret ke Halaman Tujuan</div>
           </div>
         )}
       </div>
 
       {/* FOOTER TOMBOL AKSI SIMPAN */}
       {isPlaced && !pdfRenderLoading && (
-        <footer style={{ marginTop: '15px', textAlign: 'right' }}>
+        <footer style={{ marginTop: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: '12px', color: '#64748b' }}>💡 Geser dokumen ke bawah untuk mencari lembar tanda tangan.</span>
           <button
             onClick={handleSubmitSignature}
             disabled={loading}
