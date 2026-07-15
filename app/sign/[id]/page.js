@@ -66,7 +66,7 @@ export default function SignDocumentPage() {
     if (id) getDocumentFromSupabase();
   }, [id]);
 
-  // 3. Fungsi Kanvas Coreti Tanda Tangan
+  // 3. Fungsi Kanvas Coretan Tanda Tangan
   let isDrawing = false;
 
   const startDrawing = (e) => {
@@ -190,11 +190,11 @@ export default function SignDocumentPage() {
     }
   };
 
-  // Fungsi dinamis menentukan SRC IFrame agar mendukung HP
+  // Menentukan sumber iframe berdasarkan jenis perangkat
   const getIframeSrc = () => {
     if (!documentData?.file_url) return "";
     
-    // Jika diakses dari HP, gunakan Google Docs Viewer Embed
+    // Jika diakses menggunakan HP, gunakan Google Docs Viewer API
     if (isMobile) {
       return `https://docs.google.com/gview?url=${encodeURIComponent(documentData.file_url)}&embedded=true`;
     }
