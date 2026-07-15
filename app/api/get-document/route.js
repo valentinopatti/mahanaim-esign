@@ -1,8 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 
-// Kredensial Resmi Proyek Supabase Anda
-const supabaseUrl = 'https://khlpzyyshtuwronalntr.supabase.co'; 
-const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtobHB6eXlzaHR1d3JvbmFsbnRyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQwNzY3NzQsImV4cCI6MjA5OTY1Mjc3NH0.pgxKvHCXl-ah4GbhMCbgNQ3dRNx-J1dWIwVNJNKVYCQ'; 
+// Membaca dari Environment Variable (Tidak bocor di GitHub)
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://khlpzyyshtuwronalntr.supabase.co'; 
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY; 
 
 const cleanUrl = supabaseUrl.replace(/\/$/, "").replace(/\/rest\/v1$/, "");
 const supabase = createClient(cleanUrl, supabaseAnonKey);
