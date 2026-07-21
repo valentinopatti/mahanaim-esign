@@ -5,23 +5,26 @@ import { Resend } from 'resend';
 // Membaca dari Environment Variable
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://khlpzyyshtuwronalntr.supabase.co'; 
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY; 
-const resend = new Resend(process.env.RESEND_API_KEY); 
+// Dibuat lazy & opsional: konstruktor Resend melempar error saat modul dimuat jika key kosong,
+// yang tadinya membuat SELURUH endpoint ini 500 untuk setiap permintaan ketika RESEND_API_KEY belum diisi.
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 const cleanUrl = supabaseUrl.replace(/\/$/, "").replace(/\/rest\/v1$/, "");
 const supabase = createClient(cleanUrl, supabaseAnonKey);
 
 export async function POST(request) {
   try {
-    const { 
-      documentId, 
-      signatureImage, 
-      coordinateX, 
-      coordinateY, 
-      pageNumber, 
-      containerWidth, 
+    const {
+      documentId,
+      signatureImage,
+      coordinateX,
+      coordinateY,
+      pageNumber,
+      containerWidth,
       containerHeight,
-      percentX, 
-      percentY 
+      percentX,
+      percentY,
+      percentWidth
     } = await request.json();
 
     // 1. Ambil data dokumen dari Supabase
@@ -50,9 +53,11 @@ export async function POST(request) {
     const sigImageRaw = signatureImage.split(';base64,')[1] || signatureImage;
     const embeddedImage = await pdfDoc.embedPng(Buffer.from(sigImageRaw, 'base64'));
 
-    // --- UKURAN TANDA TANGAN IDEAL & PROPORSIONAL (ANTI RAKSASA) ---
-    // Mengunci lebar tanda tangan sebesar 12% dari lebar kertas PDF agar pas untuk kolom kecil
-    const ttdWidth = pageWidth * 0.12; 
+    // Lebar TTD dikirim sebagai persentase dari lebar halaman PDF (bukan pixel layar) agar
+    // hasil cetak persis sama dengan ukuran yang dipilih di preview, tidak peduli zoom level saat itu.
+    // Dibatasi 5%-45% sebagai pengaman jika nilai yang dikirim tidak wajar; fallback 12% jika tidak dikirim.
+    const clampedPercentWidth = Math.min(45, Math.max(5, Number(percentWidth) || 12));
+    const ttdWidth = pageWidth * (clampedPercentWidth / 100);
     const aspectRatio = embeddedImage.height / embeddedImage.width;
     const ttdHeight = ttdWidth * aspectRatio;
 
@@ -128,8 +133,10 @@ export async function POST(request) {
       return new Response(JSON.stringify({ error: updateError.message }), { status: 500 });
     }
 
-    // 8. Kirim notifikasi email via Resend
-    try {
+    // 8. Kirim notifikasi email via Resend (dilewati jika RESEND_API_KEY belum diset)
+    if (!resend) {
+      console.warn('RESEND_API_KEY belum diset — notifikasi email dilewati.');
+    } else try {
       const pdfBuffer = Buffer.from(modifiedPdfBytes);
       await resend.emails.send({
         from: 'Mahanaim E-Sign <onboarding@resend.dev>',
