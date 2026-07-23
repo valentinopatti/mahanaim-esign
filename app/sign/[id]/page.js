@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import RequireAuth, { useAuth } from '../../components/RequireAuth';
 import SignaturePad from '../../components/SignaturePad';
 import { authedFetch } from '../../lib/authedFetch';
@@ -19,12 +19,16 @@ function newPlacementId() {
 
 function SignPageContent() {
   const { id } = useParams();
+  const router = useRouter();
   const { profile } = useAuth();
 
-  const [accessState, setAccessState] = useState('loading'); // loading | forbidden | waiting | viewer | signer | notFound
+  const [accessState, setAccessState] = useState('loading'); // loading | forbidden | waiting | viewer | signer | signed | notFound
   const [documentMeta, setDocumentMeta] = useState(null);
   const [blockingSigner, setBlockingSigner] = useState(null);
   const [requiredPages, setRequiredPages] = useState([]); // [{ page_number, fulfilled }]
+  const [canRetract, setCanRetract] = useState(false);
+  const [retractDeadline, setRetractDeadline] = useState(null);
+  const [retracting, setRetracting] = useState(false);
 
   const [pdfInstance, setPdfInstance] = useState(null);
   const [pdfPages, setPdfPages] = useState([]);
@@ -60,47 +64,65 @@ function SignPageContent() {
   const isResizing = useRef(false);
   const resizeStart = useRef({ x: 0, widthPercent: DEFAULT_SIG_PERCENT, containerWidth: 1 });
 
+  // Menandai permintaan loadDocument() mana yang terbaru, supaya panggilan lama yang masih
+  // berjalan (mis. akibat React StrictMode memanggil effect dua kali saat development, atau
+  // dipanggil ulang cepat setelah retract) tidak menimpa hasil dari panggilan yang lebih baru.
+  const loadRequestId = useRef(0);
+
   const showToast = useCallback((message) => {
     setToast({ message });
     setTimeout(() => setToast(null), 3500);
   }, []);
 
-  // 1. Ambil metadata dokumen lewat API (server memutuskan hak akses saya di sini)
+  // 1. Ambil metadata dokumen lewat API (server memutuskan hak akses saya di sini).
+  // Fungsi ini dipakai ulang saat pertama kali dibuka, dan setelah tanda tangan/retract
+  // (lewat tombol "Lihat Dokumen" atau setelah retract berhasil) untuk memuat versi terbaru.
+  const loadDocument = useCallback(async () => {
+    const requestId = ++loadRequestId.current;
+    const isStale = () => requestId !== loadRequestId.current;
+
+    const res = await authedFetch(`/api/documents/${id}`);
+    if (isStale()) return;
+    if (res.status === 404) { setAccessState('notFound'); return; }
+    if (res.status === 403) { setAccessState('forbidden'); return; }
+    if (!res.ok) { setAccessState('forbidden'); return; }
+
+    const payload = await res.json();
+    if (isStale()) return;
+    setDocumentMeta(payload);
+    setBlockingSigner(payload.blockingSigner);
+    setRequiredPages(payload.myRequiredPages || []);
+    setCanRetract(payload.canRetract);
+    setRetractDeadline(payload.retractDeadline);
+    setPlacements([]);
+
+    if (payload.myRecipient?.role === 'viewer') {
+      setAccessState('viewer');
+    } else if (payload.myRecipient?.status === 'waiting') {
+      setAccessState('waiting');
+    } else if (payload.myRecipient?.status === 'signed') {
+      setAccessState('signed');
+    } else {
+      setAccessState('signer');
+    }
+
+    if (profile?.saved_signature) setSignatureImage(profile.saved_signature);
+
+    setPdfRenderLoading(true);
+    setPdfInstance(null);
+    initializedZoom.current = false;
+    const pdfjsLib = await loadPdfjs();
+    const response = await fetch(payload.document.current_file_url);
+    const arrayBuffer = await response.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    if (isStale()) return;
+    setPdfInstance(pdf);
+  }, [id, profile]);
+
   useEffect(() => {
     if (!id) return;
-    let cancelled = false;
-
-    async function loadDoc() {
-      const res = await authedFetch(`/api/documents/${id}`);
-      if (cancelled) return;
-      if (res.status === 404) { setAccessState('notFound'); return; }
-      if (res.status === 403) { setAccessState('forbidden'); return; }
-      if (!res.ok) { setAccessState('forbidden'); return; }
-
-      const payload = await res.json();
-      setDocumentMeta(payload);
-      setBlockingSigner(payload.blockingSigner);
-      setRequiredPages(payload.myRequiredPages || []);
-
-      if (payload.myRecipient?.role === 'viewer') {
-        setAccessState('viewer');
-      } else if (payload.myRecipient?.status === 'waiting') {
-        setAccessState('waiting');
-      } else {
-        setAccessState('signer');
-      }
-
-      if (profile?.saved_signature) setSignatureImage(profile.saved_signature);
-
-      const pdfjsLib = await loadPdfjs();
-      const response = await fetch(payload.document.current_file_url);
-      const arrayBuffer = await response.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-      if (!cancelled) setPdfInstance(pdf);
-    }
-    loadDoc();
-    return () => { cancelled = true; };
-  }, [id, profile]);
+    loadDocument();
+  }, [id, loadDocument]);
 
   // 2. Skala awal menyesuaikan lebar layar (fit-to-width)
   useEffect(() => {
@@ -181,20 +203,54 @@ function SignPageContent() {
     setPlacements((prev) => [...prev, { id: newPlacementId(), pageNumber: pageNum, x: 60, y: 78, widthPercent: DEFAULT_SIG_PERCENT }]);
   };
 
+  // Perkiraan rasio tinggi/lebar gambar TTD, untuk memusatkan kotak TTD secara vertikal juga (bukan cuma horizontal).
+  const getImageAspectRatio = (dataUrl) => new Promise((resolve) => {
+    const img = new window.Image();
+    img.onload = () => resolve(img.naturalWidth ? img.naturalHeight / img.naturalWidth : 0.4);
+    img.onerror = () => resolve(0.4);
+    img.src = dataUrl;
+  });
+
+  // Menempatkan TTD tepat di tengah area layar yang sedang terlihat saat ini (bukan di posisi baku),
+  // pada halaman yang sedang di-scroll.
+  const addPlacementCenteredOnPage = async (pageNum, imageForAspect) => {
+    const container = pageRefs.current[pageNum];
+    if (!container || !scrollContainerRef.current) {
+      addPlacementToPage(pageNum);
+      return;
+    }
+    const viewportRect = scrollContainerRef.current.getBoundingClientRect();
+    const pageRect = container.getBoundingClientRect();
+    const centerClientX = viewportRect.left + viewportRect.width / 2;
+    const centerClientY = viewportRect.top + viewportRect.height / 2;
+
+    const widthPercent = DEFAULT_SIG_PERCENT;
+    const aspect = await getImageAspectRatio(imageForAspect);
+    const widthPx = (widthPercent / 100) * pageRect.width;
+    const heightPercentOfPage = ((widthPx * aspect) / pageRect.height) * 100;
+
+    let x = ((centerClientX - pageRect.left) / pageRect.width) * 100 - widthPercent / 2;
+    let y = ((centerClientY - pageRect.top) / pageRect.height) * 100 - heightPercentOfPage / 2;
+    x = Math.min(90, Math.max(0, x));
+    y = Math.min(95, Math.max(0, y));
+
+    setPlacements((prev) => [...prev, { id: newPlacementId(), pageNumber: pageNum, x, y, widthPercent }]);
+  };
+
   const finalizeSignature = (dataUrl) => {
     setSignatureImage(dataUrl);
     setIsModalOpen(false);
     if (modalIntent.type === 'addToPage') {
-      addPlacementToPage(modalIntent.pageNumber || currentVisiblePage);
+      addPlacementCenteredOnPage(modalIntent.pageNumber || currentVisiblePage, dataUrl);
     }
   };
 
-  const handlePageButtonClick = (pageNum) => {
+  const handleSignThisPage = () => {
     if (!signatureImage) {
-      setModalIntent({ type: 'addToPage', pageNumber: pageNum });
+      setModalIntent({ type: 'addToPage', pageNumber: currentVisiblePage });
       setIsModalOpen(true);
     } else {
-      addPlacementToPage(pageNum);
+      addPlacementCenteredOnPage(currentVisiblePage, signatureImage);
     }
   };
 
@@ -315,6 +371,33 @@ function SignPageContent() {
     }
   };
 
+  const handleViewSignedDocument = async () => {
+    setSubmitSuccess(false);
+    await loadDocument();
+  };
+
+  const handleRetract = async () => {
+    if (!window.confirm('Yakin ingin membatalkan tanda tangan Anda pada dokumen ini?')) return;
+    setRetracting(true);
+    try {
+      const res = await authedFetch('/api/sign/retract', {
+        method: 'POST',
+        body: JSON.stringify({ documentId: id }),
+      });
+      if (res.ok) {
+        showToast('Tanda tangan berhasil dibatalkan.');
+        await loadDocument();
+      } else {
+        const err = await res.json();
+        showToast(err.error || 'Gagal membatalkan tanda tangan.');
+      }
+    } catch {
+      showToast('Gangguan koneksi internet.');
+    } finally {
+      setRetracting(false);
+    }
+  };
+
   if (accessState === 'loading') {
     return (
       <div className="flex h-[100dvh] items-center justify-center bg-slate-100">
@@ -357,13 +440,23 @@ function SignPageContent() {
         <div className="max-w-sm w-full bg-white rounded-2xl shadow-lg border border-slate-200 p-8 text-center">
           <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 text-3xl">✓</div>
           <h2 className="font-bold text-lg text-slate-800 mb-1">Dokumen Berhasil Ditandatangani</h2>
-          <p className="text-sm text-slate-500">{documentMeta?.document.file_name}</p>
+          <p className="text-sm text-slate-500 mb-5">{documentMeta?.document.file_name}</p>
+          <div className="flex gap-2">
+            <button onClick={() => router.push('/dashboard')} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg py-2.5 text-sm">
+              ← Dashboard
+            </button>
+            <button onClick={handleViewSignedDocument} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg py-2.5 text-sm">
+              📄 Lihat Dokumen
+            </button>
+          </div>
         </div>
       </div>
     );
   }
 
   const isViewer = accessState === 'viewer';
+  const isAlreadySigned = accessState === 'signed';
+  const isReadOnly = isViewer || isAlreadySigned;
   const requiredPageNumbers = requiredPages.map((rp) => rp.page_number);
   const unmetRequiredPages = requiredPageNumbers.filter((pn) => !placements.some((p) => p.pageNumber === pn));
   const canSubmit = signatureImage && placements.length > 0 && unmetRequiredPages.length === 0;
@@ -374,7 +467,7 @@ function SignPageContent() {
         <div className="min-w-0">
           <h1 className="text-sm sm:text-base font-bold text-slate-800 truncate">Mahanaim Studio Sign</h1>
           <p className="text-[11px] sm:text-xs text-slate-500 truncate">
-            {documentMeta?.document.file_name} <span className="text-slate-300">|</span> {isViewer ? 'Mode Lihat Saja' : `Masuk sebagai ${profile?.full_name}`}
+            {documentMeta?.document.file_name} <span className="text-slate-300">|</span> {isViewer ? 'Mode Lihat Saja' : isAlreadySigned ? 'Sudah Anda Tanda Tangani' : `Masuk sebagai ${profile?.full_name}`}
           </p>
         </div>
         <div className="hidden sm:flex items-center gap-1 bg-slate-100 rounded-full px-1 py-1 border border-slate-200 shrink-0">
@@ -396,7 +489,15 @@ function SignPageContent() {
           </div>
         )}
 
-        {!pdfRenderLoading && !isViewer && requiredPageNumbers.length > 0 && (
+        {!pdfRenderLoading && isAlreadySigned && (
+          <div className={`sticky top-0 z-30 mx-auto mb-4 max-w-fit rounded-full px-3 py-1.5 text-xs font-semibold shadow ${canRetract ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
+            {canRetract
+              ? `Anda bisa membatalkan tanda tangan sampai ${new Date(retractDeadline).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}`
+              : '✓ Dokumen sudah Anda tanda tangani'}
+          </div>
+        )}
+
+        {!pdfRenderLoading && !isReadOnly && requiredPageNumbers.length > 0 && (
           <div className={`sticky top-0 z-30 mx-auto mb-4 max-w-fit rounded-full px-3 py-1.5 text-xs font-semibold shadow ${unmetRequiredPages.length > 0 ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
             {unmetRequiredPages.length > 0
               ? `Wajib TTD di halaman: ${unmetRequiredPages.join(', ')}`
@@ -418,7 +519,7 @@ function SignPageContent() {
                   <span className="text-[11px] font-bold text-slate-500 bg-slate-300/70 px-2 py-0.5 rounded">
                     Halaman {pageObj.pageNumber}
                   </span>
-                  {requiredPageNumbers.includes(pageObj.pageNumber) && (
+                  {!isReadOnly && requiredPageNumbers.includes(pageObj.pageNumber) && (
                     pagePlacements.length > 0 ? (
                       <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">✓ Wajib TTD</span>
                     ) : (
@@ -426,14 +527,6 @@ function SignPageContent() {
                     )
                   )}
                 </span>
-                {!isViewer && (
-                  <button
-                    onClick={() => handlePageButtonClick(pageObj.pageNumber)}
-                    className="text-[11px] font-bold px-2.5 py-1 rounded-full text-white shadow-sm transition-colors bg-blue-600 hover:bg-blue-700"
-                  >
-                    {pagePlacements.length > 0 ? `+ Tambah lagi (${pagePlacements.length})` : '+ Tempatkan TTD di sini'}
-                  </button>
-                )}
               </div>
 
               <div
@@ -443,7 +536,7 @@ function SignPageContent() {
               >
                 <canvas id={`pdf-canvas-p-${pageObj.pageNumber}`} className="block w-full h-auto" />
 
-                {!isViewer && signatureImage && pagePlacements.map((placement) => {
+                {!isReadOnly && signatureImage && pagePlacements.map((placement) => {
                   const isDraggingThis = activeDragId === placement.id;
                   return (
                     <div
@@ -517,23 +610,38 @@ function SignPageContent() {
           className="shrink-0 z-30 bg-white border-t border-slate-200 px-3 sm:px-5 py-3 flex items-center justify-between gap-3"
           style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}
         >
-          {!signatureImage ? (
-            <button
-              onClick={() => { setModalIntent({ type: 'addToPage', pageNumber: currentVisiblePage }); setIsModalOpen(true); }}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg py-3 text-sm shadow"
-            >
-              ✍️ Tempatkan Tanda Tangan
-            </button>
+          {isAlreadySigned ? (
+            <>
+              <button onClick={() => router.push('/dashboard')} className="text-sm font-bold text-slate-600 px-3 py-3">
+                ← Dashboard
+              </button>
+              {canRetract && (
+                <button
+                  onClick={handleRetract}
+                  disabled={retracting}
+                  className="flex-1 max-w-[240px] bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-bold rounded-lg py-3 text-sm shadow"
+                >
+                  {retracting ? 'Membatalkan...' : '🗑️ Batalkan Tanda Tangan'}
+                </button>
+              )}
+            </>
           ) : (
             <>
-              <button onClick={openChangeSignatureModal} className="flex items-center gap-2 shrink-0">
-                <img src={signatureImage} alt="TTD" className="h-8 w-14 object-contain border border-slate-200 rounded bg-slate-50" />
-                <span className="text-xs font-semibold text-blue-600">Ganti</span>
+              {signatureImage && (
+                <button onClick={openChangeSignatureModal} className="shrink-0" title="Ganti tanda tangan">
+                  <img src={signatureImage} alt="TTD" className="h-10 w-12 object-contain border border-slate-200 rounded bg-slate-50" />
+                </button>
+              )}
+              <button
+                onClick={handleSignThisPage}
+                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg py-3 text-sm shadow"
+              >
+                ✍️ Sign This Page
               </button>
               <button
                 onClick={handleSubmitSignature}
                 disabled={submitting || !canSubmit}
-                className="flex-1 max-w-[240px] bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-lg py-3 text-sm shadow"
+                className="flex-1 max-w-[220px] bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-lg py-3 text-sm shadow"
               >
                 {submitting
                   ? 'Menyimpan...'

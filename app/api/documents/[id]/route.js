@@ -1,5 +1,6 @@
 import { supabaseAdmin } from '../../../../lib/supabaseAdmin';
 import { getUserFromRequest, unauthorized, forbidden } from '../../../../lib/serverAuth';
+import { computeRetractEligibility } from '../../../../lib/retract';
 
 export async function GET(request, { params }) {
   const auth = await getUserFromRequest(request);
@@ -51,6 +52,8 @@ export async function GET(request, { params }) {
     myRequiredPages = data || [];
   }
 
+  const { canRetract, retractDeadline } = computeRetractEligibility(myRecipient, recipients);
+
   return new Response(JSON.stringify({
     document: doc,
     recipients,
@@ -58,5 +61,7 @@ export async function GET(request, { params }) {
     myRecipient,
     myRequiredPages,
     blockingSigner: blockingSigner ? { full_name: blockingSigner.profiles.full_name } : null,
+    canRetract,
+    retractDeadline,
   }), { status: 200 });
 }
