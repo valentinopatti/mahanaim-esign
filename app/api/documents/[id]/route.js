@@ -41,11 +41,22 @@ export async function GET(request, { params }) {
     ? recipients.find((r) => r.role === 'signer' && r.order_index < myRecipient.order_index && r.status !== 'signed')
     : null;
 
+  let myRequiredPages = [];
+  if (myRecipient) {
+    const { data } = await supabaseAdmin
+      .from('document_required_pages')
+      .select('page_number, fulfilled')
+      .eq('document_recipient_id', myRecipient.id)
+      .order('page_number', { ascending: true });
+    myRequiredPages = data || [];
+  }
+
   return new Response(JSON.stringify({
     document: doc,
     recipients,
     isOwner,
     myRecipient,
+    myRequiredPages,
     blockingSigner: blockingSigner ? { full_name: blockingSigner.profiles.full_name } : null,
   }), { status: 200 });
 }

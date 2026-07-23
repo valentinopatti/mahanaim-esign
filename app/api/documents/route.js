@@ -35,15 +35,26 @@ export async function POST(request) {
   const file = formData.get('file');
   const signingMode = formData.get('signing_mode') === 'sequential' ? 'sequential' : 'parallel';
   let recipients;
+  let requiredPages;
   try {
     recipients = JSON.parse(formData.get('recipients') || '[]');
+    requiredPages = JSON.parse(formData.get('required_pages') || '{}');
   } catch {
-    return new Response(JSON.stringify({ error: 'Format penerima tidak valid.' }), { status: 400 });
+    return new Response(JSON.stringify({ error: 'Format penerima atau halaman wajib tidak valid.' }), { status: 400 });
   }
 
   if (!file) return new Response(JSON.stringify({ error: 'File PDF wajib diunggah.' }), { status: 400 });
   if (!Array.isArray(recipients) || recipients.length === 0) {
     return new Response(JSON.stringify({ error: 'Minimal harus ada 1 penerima.' }), { status: 400 });
+  }
+
+  // Setiap penanda tangan wajib punya minimal 1 halaman yang ditentukan pengunggah.
+  for (const r of recipients) {
+    if (r.role !== 'signer') continue;
+    const pages = requiredPages[r.user_id];
+    if (!Array.isArray(pages) || pages.length === 0) {
+      return new Response(JSON.stringify({ error: 'Tentukan minimal 1 halaman wajib TTD untuk setiap penanda tangan.' }), { status: 400 });
+    }
   }
 
   const bytes = Buffer.from(await file.arrayBuffer());
@@ -85,6 +96,17 @@ export async function POST(request) {
     .insert(rowsToInsert)
     .select('*, profiles(full_name, email)');
   if (recipientsError) return new Response(JSON.stringify({ error: recipientsError.message }), { status: 500 });
+
+  const requiredPageRows = insertedRecipients.flatMap((recipient) => {
+    const original = recipients.find((r) => r.user_id === recipient.user_id);
+    if (original?.role !== 'signer') return [];
+    const pages = requiredPages[recipient.user_id] || [];
+    return pages.map((pageNumber) => ({ document_recipient_id: recipient.id, page_number: Number(pageNumber) }));
+  });
+  if (requiredPageRows.length) {
+    const { error: pagesError } = await supabaseAdmin.from('document_required_pages').insert(requiredPageRows);
+    if (pagesError) return new Response(JSON.stringify({ error: pagesError.message }), { status: 500 });
+  }
 
   const baseUrl = appBaseUrl(request);
   const events = [];

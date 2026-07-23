@@ -37,6 +37,20 @@ export async function POST(request) {
   if (me.status === 'signed') return new Response(JSON.stringify({ error: 'Anda sudah menandatangani dokumen ini.' }), { status: 400 });
   if (me.status === 'waiting') return forbidden('Belum giliran Anda untuk menandatangani.');
 
+  const { data: requiredPages } = await supabaseAdmin
+    .from('document_required_pages')
+    .select('*')
+    .eq('document_recipient_id', me.id);
+
+  if (requiredPages && requiredPages.length > 0) {
+    const submittedPages = new Set(placements.map((p) => Number(p.pageNumber)));
+    const missing = requiredPages.filter((rp) => !submittedPages.has(rp.page_number));
+    if (missing.length > 0) {
+      const missingList = missing.map((rp) => rp.page_number).sort((a, b) => a - b).join(', ');
+      return new Response(JSON.stringify({ error: `Anda wajib menandatangani di halaman: ${missingList}.` }), { status: 400 });
+    }
+  }
+
   // --- Cetak tanda tangan ke PDF, satu per penempatan (persentase terhadap ukuran halaman, zoom-invariant) ---
   const pdfBase64Raw = doc.current_file_url.split(';base64,')[1] || doc.current_file_url;
   const pdfDoc = await PDFDocument.load(Buffer.from(pdfBase64Raw, 'base64'));
@@ -100,6 +114,13 @@ export async function POST(request) {
       percent_width: p.percentWidth,
     }))
   );
+
+  if (requiredPages && requiredPages.length > 0) {
+    await supabaseAdmin
+      .from('document_required_pages')
+      .update({ fulfilled: true })
+      .eq('document_recipient_id', me.id);
+  }
 
   await supabaseAdmin.from('document_events').insert([{ document_id: documentId, recipient_id: me.id, event_type: 'signed' }]);
 

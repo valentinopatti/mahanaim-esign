@@ -2,17 +2,10 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams } from 'next/navigation';
-import * as pdfjsLib from 'pdfjs-dist';
 import RequireAuth, { useAuth } from '../../components/RequireAuth';
 import SignaturePad from '../../components/SignaturePad';
 import { authedFetch } from '../../lib/authedFetch';
-
-if (typeof window !== 'undefined' && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/build/pdf.worker.min.mjs',
-    import.meta.url
-  ).toString();
-}
+import { loadPdfjs } from '../../lib/pdfjs';
 
 const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 3.5;
@@ -31,6 +24,7 @@ function SignPageContent() {
   const [accessState, setAccessState] = useState('loading'); // loading | forbidden | waiting | viewer | signer | notFound
   const [documentMeta, setDocumentMeta] = useState(null);
   const [blockingSigner, setBlockingSigner] = useState(null);
+  const [requiredPages, setRequiredPages] = useState([]); // [{ page_number, fulfilled }]
 
   const [pdfInstance, setPdfInstance] = useState(null);
   const [pdfPages, setPdfPages] = useState([]);
@@ -86,6 +80,7 @@ function SignPageContent() {
       const payload = await res.json();
       setDocumentMeta(payload);
       setBlockingSigner(payload.blockingSigner);
+      setRequiredPages(payload.myRequiredPages || []);
 
       if (payload.myRecipient?.role === 'viewer') {
         setAccessState('viewer');
@@ -97,6 +92,7 @@ function SignPageContent() {
 
       if (profile?.saved_signature) setSignatureImage(profile.saved_signature);
 
+      const pdfjsLib = await loadPdfjs();
       const response = await fetch(payload.document.current_file_url);
       const arrayBuffer = await response.arrayBuffer();
       const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -290,6 +286,7 @@ function SignPageContent() {
 
   const handleSubmitSignature = async () => {
     if (!signatureImage || placements.length === 0) return showToast('Tempatkan minimal 1 tanda tangan terlebih dahulu.');
+    if (unmetRequiredPages.length > 0) return showToast(`Wajib TTD di halaman: ${unmetRequiredPages.join(', ')}.`);
     setSubmitting(true);
     try {
       const res = await authedFetch('/api/sign', {
@@ -367,6 +364,9 @@ function SignPageContent() {
   }
 
   const isViewer = accessState === 'viewer';
+  const requiredPageNumbers = requiredPages.map((rp) => rp.page_number);
+  const unmetRequiredPages = requiredPageNumbers.filter((pn) => !placements.some((p) => p.pageNumber === pn));
+  const canSubmit = signatureImage && placements.length > 0 && unmetRequiredPages.length === 0;
 
   return (
     <div className="flex flex-col h-[100dvh] bg-slate-100 select-none">
@@ -396,6 +396,14 @@ function SignPageContent() {
           </div>
         )}
 
+        {!pdfRenderLoading && !isViewer && requiredPageNumbers.length > 0 && (
+          <div className={`sticky top-0 z-30 mx-auto mb-4 max-w-fit rounded-full px-3 py-1.5 text-xs font-semibold shadow ${unmetRequiredPages.length > 0 ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
+            {unmetRequiredPages.length > 0
+              ? `Wajib TTD di halaman: ${unmetRequiredPages.join(', ')}`
+              : '✓ Semua halaman wajib sudah ditandatangani'}
+          </div>
+        )}
+
         {!pdfRenderLoading && pdfPages.map((pageObj) => {
           const pagePlacements = placements.filter((p) => p.pageNumber === pageObj.pageNumber);
           return (
@@ -406,8 +414,17 @@ function SignPageContent() {
               className="flex flex-col items-center mb-6"
             >
               <div className="flex items-center justify-between mb-1.5" style={{ width: pageObj.viewport.width, maxWidth: '100%' }}>
-                <span className="text-[11px] font-bold text-slate-500 bg-slate-300/70 px-2 py-0.5 rounded">
-                  Halaman {pageObj.pageNumber}
+                <span className="flex items-center gap-1.5">
+                  <span className="text-[11px] font-bold text-slate-500 bg-slate-300/70 px-2 py-0.5 rounded">
+                    Halaman {pageObj.pageNumber}
+                  </span>
+                  {requiredPageNumbers.includes(pageObj.pageNumber) && (
+                    pagePlacements.length > 0 ? (
+                      <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">✓ Wajib TTD</span>
+                    ) : (
+                      <span className="text-[11px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">⚠ Wajib TTD</span>
+                    )
+                  )}
                 </span>
                 {!isViewer && (
                   <button
@@ -515,10 +532,16 @@ function SignPageContent() {
               </button>
               <button
                 onClick={handleSubmitSignature}
-                disabled={submitting || placements.length === 0}
+                disabled={submitting || !canSubmit}
                 className="flex-1 max-w-[240px] bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-lg py-3 text-sm shadow"
               >
-                {submitting ? 'Menyimpan...' : placements.length === 0 ? 'Tempatkan TTD dulu' : `💾 Selesai & Kirim (${placements.length})`}
+                {submitting
+                  ? 'Menyimpan...'
+                  : placements.length === 0
+                    ? 'Tempatkan TTD dulu'
+                    : unmetRequiredPages.length > 0
+                      ? `Wajib TTD di hal. ${unmetRequiredPages.join(', ')}`
+                      : `💾 Selesai & Kirim (${placements.length})`}
               </button>
             </>
           )}
