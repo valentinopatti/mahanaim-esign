@@ -2,8 +2,10 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams } from 'next/navigation';
-import { createClient } from '@supabase/supabase-js';
 import * as pdfjsLib from 'pdfjs-dist';
+import RequireAuth, { useAuth } from '../../components/RequireAuth';
+import SignaturePad from '../../components/SignaturePad';
+import { authedFetch } from '../../lib/authedFetch';
 
 if (typeof window !== 'undefined' && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
   pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -12,21 +14,20 @@ if (typeof window !== 'undefined' && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
   ).toString();
 }
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://khlpzyyshtuwronalntr.supabase.co';
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
-
 const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 3.5;
 const MIN_SIG_PERCENT = 8;
 const MAX_SIG_PERCENT = 32;
 const DEFAULT_SIG_PERCENT = 15;
 
-export default function SignDocumentPage() {
+function SignPageContent() {
   const { id } = useParams();
+  const { profile } = useAuth();
 
-  const [documentData, setDocumentData] = useState(null);
-  const [loadError, setLoadError] = useState(null);
+  const [accessState, setAccessState] = useState('loading'); // loading | forbidden | waiting | viewer | signer | notFound
+  const [documentMeta, setDocumentMeta] = useState(null);
+  const [blockingSigner, setBlockingSigner] = useState(null);
+
   const [pdfInstance, setPdfInstance] = useState(null);
   const [pdfPages, setPdfPages] = useState([]);
   const [pdfRenderLoading, setPdfRenderLoading] = useState(true);
@@ -43,14 +44,11 @@ export default function SignDocumentPage() {
   const [isDraggingActive, setIsDraggingActive] = useState(false);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [signMethod, setSignMethod] = useState('draw');
 
   const [submitting, setSubmitting] = useState(false);
   const [submitSuccess, setSubmitSuccess] = useState(false);
   const [toast, setToast] = useState(null);
 
-  const signatureCanvasRef = useRef(null);
-  const fileInputRef = useRef(null);
   const scrollContainerRef = useRef(null);
   const pageRefs = useRef({});
   const initializedZoom = useRef(false);
@@ -59,51 +57,48 @@ export default function SignDocumentPage() {
   const isDragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
   const positionStart = useRef({ x: 60, y: 78 });
-  const isDrawing = useRef(false);
 
-  const showToast = useCallback((message, type = 'error') => {
-    setToast({ message, type });
+  const showToast = useCallback((message) => {
+    setToast({ message });
     setTimeout(() => setToast(null), 3500);
   }, []);
 
-  // 1. Ambil metadata dokumen dari Supabase, lalu unduh PDF-nya
+  // 1. Ambil metadata dokumen lewat API (server memutuskan hak akses saya di sini)
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
 
-    async function loadPDF() {
-      try {
-        setLoadError(null);
-        setPdfRenderLoading(true);
-        const { data, error } = await supabase
-          .from('documents')
-          .select('*')
-          .eq('id', id)
-          .single();
+    async function loadDoc() {
+      const res = await authedFetch(`/api/documents/${id}`);
+      if (cancelled) return;
+      if (res.status === 404) { setAccessState('notFound'); return; }
+      if (res.status === 403) { setAccessState('forbidden'); return; }
+      if (!res.ok) { setAccessState('forbidden'); return; }
 
-        if (error) throw error;
-        if (!data || !data.file_url) throw new Error('Berkas dokumen tidak ditemukan.');
-        if (cancelled) return;
-        setDocumentData(data);
+      const payload = await res.json();
+      setDocumentMeta(payload);
+      setBlockingSigner(payload.blockingSigner);
 
-        const response = await fetch(data.file_url);
-        const arrayBuffer = await response.arrayBuffer();
-        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-        if (cancelled) return;
-        setPdfInstance(pdf);
-      } catch (err) {
-        console.error('Gagal memuat berkas:', err);
-        if (!cancelled) {
-          setLoadError(err.message || 'Gagal memuat dokumen.');
-          setPdfRenderLoading(false);
-        }
+      if (payload.myRecipient?.role === 'viewer') {
+        setAccessState('viewer');
+      } else if (payload.myRecipient?.status === 'waiting') {
+        setAccessState('waiting');
+      } else {
+        setAccessState('signer');
       }
-    }
-    loadPDF();
-    return () => { cancelled = true; };
-  }, [id]);
 
-  // 2. Skala awal menyesuaikan lebar layar (fit-to-width), seperti pembuka PDF di HP/Acrobat
+      if (profile?.saved_signature) setSignatureImage(profile.saved_signature);
+
+      const response = await fetch(payload.document.current_file_url);
+      const arrayBuffer = await response.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      if (!cancelled) setPdfInstance(pdf);
+    }
+    loadDoc();
+    return () => { cancelled = true; };
+  }, [id, profile]);
+
+  // 2. Skala awal menyesuaikan lebar layar (fit-to-width)
   useEffect(() => {
     if (!pdfInstance || initializedZoom.current) return;
     let cancelled = false;
@@ -124,7 +119,6 @@ export default function SignDocumentPage() {
   useEffect(() => {
     if (!pdfInstance || !initializedZoom.current) return;
     let cancelled = false;
-
     async function renderPages() {
       const pagesArray = [];
       for (let i = 1; i <= pdfInstance.numPages; i++) {
@@ -153,16 +147,14 @@ export default function SignDocumentPage() {
     });
   }, [pdfPages]);
 
-  // 5. Lacak halaman yang sedang terlihat saat scroll (seperti indikator halaman di Acrobat)
+  // 5. Lacak halaman yang sedang terlihat saat scroll
   useEffect(() => {
     if (!pdfPages.length) return;
     const observer = new IntersectionObserver(
       (entries) => {
         let best = null;
         entries.forEach((entry) => {
-          if (entry.isIntersecting && (!best || entry.intersectionRatio > best.intersectionRatio)) {
-            best = entry;
-          }
+          if (entry.isIntersecting && (!best || entry.intersectionRatio > best.intersectionRatio)) best = entry;
         });
         if (best) setCurrentVisiblePage(Number(best.target.dataset.page));
       },
@@ -175,76 +167,17 @@ export default function SignDocumentPage() {
   const zoomIn = () => setZoomScale((prev) => Math.min(MAX_ZOOM, prev * 1.2));
   const zoomOut = () => setZoomScale((prev) => Math.max(MIN_ZOOM, prev / 1.2));
   const resetZoom = () => setZoomScale(baseFitScale.current);
-
   const jumpToPage = (n) => {
     const num = Math.min(Math.max(1, n), pdfPages.length);
     pageRefs.current[num]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     setPageJumpOpen(false);
   };
 
-  // --- Menggambar coretan tanda tangan ---
-  const startDrawing = (e) => { isDrawing.current = true; draw(e); };
-  const stopDrawing = () => {
-    isDrawing.current = false;
-    if (signatureCanvasRef.current) signatureCanvasRef.current.getContext('2d').beginPath();
-  };
-  const draw = (e) => {
-    if (!isDrawing.current || !signatureCanvasRef.current) return;
-    const canvas = signatureCanvasRef.current;
-    const ctx = canvas.getContext('2d');
-    ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.strokeStyle = '#000000';
-    const rect = canvas.getBoundingClientRect();
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const x = (clientX - rect.left) * scaleX;
-    const y = (clientY - rect.top) * scaleY;
-    ctx.lineTo(x, y);
-    ctx.stroke(); ctx.beginPath(); ctx.moveTo(x, y);
-    if (e.cancelable) e.preventDefault();
-  };
-  const clearCanvas = () => {
-    if (!signatureCanvasRef.current) return;
-    const canvas = signatureCanvasRef.current;
-    canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
-  };
-
-  // --- Menempatkan/mengganti tanda tangan ---
   const finalizeSignature = (dataUrl) => {
     setSignatureImage(dataUrl);
     setIsModalOpen(false);
     setActivePageTarget((prev) => prev || currentVisiblePage);
     setPosition({ x: 60, y: 78 });
-  };
-
-  const handleImageUpload = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = img.width; canvas.height = img.height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0);
-        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const data = imgData.data;
-        for (let i = 0; i < data.length; i += 4) {
-          if (data[i] > 200 && data[i + 1] > 200 && data[i + 2] > 200) data[i + 3] = 0;
-        }
-        ctx.putImageData(imgData, 0, 0);
-        finalizeSignature(canvas.toDataURL('image/png'));
-      };
-      img.src = event.target.result;
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const saveCanvasImage = () => {
-    if (!signatureCanvasRef.current) return;
-    finalizeSignature(signatureCanvasRef.current.toDataURL('image/png'));
   };
 
   const openSignatureModal = () => {
@@ -264,7 +197,6 @@ export default function SignDocumentPage() {
 
   const detachSignatureFromPage = () => setActivePageTarget(null);
 
-  // --- Seret (drag) tanda tangan, posisi dalam persen relatif terhadap halaman (independen dari zoom) ---
   const handleStart = (e) => {
     if (e.target.className?.includes?.('nodrag')) return;
     isDragging.current = true;
@@ -285,10 +217,8 @@ export default function SignDocumentPage() {
     const deltaX = clientX - dragStart.current.x;
     const deltaY = clientY - dragStart.current.y;
     const rect = container.getBoundingClientRect();
-
     let newX = positionStart.current.x + (deltaX / rect.width) * 100;
     let newY = positionStart.current.y + (deltaY / rect.height) * 100;
-
     if (newX < 0) newX = 0; if (newY < 0) newY = 0;
     if (newX > 90) newX = 90; if (newY > 95) newY = 95;
     setPosition({ x: newX, y: newY });
@@ -296,8 +226,6 @@ export default function SignDocumentPage() {
 
   const handleEnd = () => { isDragging.current = false; setIsDraggingActive(false); };
 
-  // Dengarkan gerakan di seluruh window (bukan hanya di dalam kotak TTD) selama proses geser,
-  // supaya drag tidak terhenti begitu kursor bergerak cepat keluar dari area kotak.
   useEffect(() => {
     if (!isDraggingActive) return;
     const onMove = (e) => handleMove(e);
@@ -318,41 +246,61 @@ export default function SignDocumentPage() {
     if (!signatureImage || !activePageTarget) return showToast('Silakan pasang tanda tangan Anda terlebih dahulu.');
     setSubmitting(true);
     try {
-      const response = await fetch('/api/save-signature', {
+      const res = await authedFetch('/api/sign', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           documentId: id,
           signatureImage,
           percentX: position.x,
           percentY: position.y,
           pageNumber: activePageTarget,
-          percentWidth: sigWidthPercent
-        })
+          percentWidth: sigWidthPercent,
+        }),
       });
-      if (response.ok) {
+      if (res.ok) {
         setSubmitSuccess(true);
       } else {
-        const errData = await response.json();
+        const errData = await res.json();
         showToast(`Gagal menyimpan: ${errData.error}`);
       }
-    } catch (err) {
+    } catch {
       showToast('Gangguan koneksi internet.');
     } finally {
       setSubmitting(false);
     }
   };
 
-  const recipientEmail = documentData?.recipient_email || documentData?.signer_email || '-';
-  const activePageObj = pdfPages.find((p) => p.pageNumber === activePageTarget);
+  if (accessState === 'loading') {
+    return (
+      <div className="flex h-[100dvh] items-center justify-center bg-slate-100">
+        <div className="w-6 h-6 border-2 border-slate-300 border-t-blue-600 rounded-full animate-spin" />
+      </div>
+    );
+  }
 
-  if (loadError) {
+  if (accessState === 'notFound' || accessState === 'forbidden') {
     return (
       <div className="flex h-[100dvh] items-center justify-center bg-slate-100 px-6">
         <div className="max-w-sm w-full bg-white rounded-2xl shadow-lg border border-slate-200 p-6 text-center">
           <div className="text-3xl mb-2">⚠️</div>
-          <h2 className="font-bold text-slate-800 mb-1">Dokumen Tidak Bisa Dibuka</h2>
-          <p className="text-sm text-slate-500">{loadError}</p>
+          <h2 className="font-bold text-slate-800 mb-1">
+            {accessState === 'notFound' ? 'Dokumen tidak ditemukan.' : 'Anda tidak memiliki akses ke dokumen ini.'}
+          </h2>
+        </div>
+      </div>
+    );
+  }
+
+  if (accessState === 'waiting') {
+    return (
+      <div className="flex h-[100dvh] items-center justify-center bg-slate-100 px-6">
+        <div className="max-w-sm w-full bg-white rounded-2xl shadow-lg border border-slate-200 p-6 text-center">
+          <div className="text-3xl mb-2">⏳</div>
+          <h2 className="font-bold text-slate-800 mb-1">Menunggu Giliran Anda</h2>
+          <p className="text-sm text-slate-500">{documentMeta?.document.file_name}</p>
+          {blockingSigner && (
+            <p className="text-xs text-slate-400 mt-2">Masih menunggu tanda tangan dari <b>{blockingSigner.full_name}</b> terlebih dahulu.</p>
+          )}
         </div>
       </div>
     );
@@ -364,12 +312,13 @@ export default function SignDocumentPage() {
         <div className="max-w-sm w-full bg-white rounded-2xl shadow-lg border border-slate-200 p-8 text-center">
           <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 text-3xl">✓</div>
           <h2 className="font-bold text-lg text-slate-800 mb-1">Dokumen Berhasil Ditandatangani</h2>
-          <p className="text-sm text-slate-500 mb-1">{documentData?.file_name}</p>
-          <p className="text-xs text-slate-400">Salinan hasil dikirim ke <b>{recipientEmail}</b></p>
+          <p className="text-sm text-slate-500">{documentMeta?.document.file_name}</p>
         </div>
       </div>
     );
   }
+
+  const isViewer = accessState === 'viewer';
 
   return (
     <div className="flex flex-col h-[100dvh] bg-slate-100 select-none">
@@ -377,7 +326,7 @@ export default function SignDocumentPage() {
         <div className="min-w-0">
           <h1 className="text-sm sm:text-base font-bold text-slate-800 truncate">Mahanaim Studio Sign</h1>
           <p className="text-[11px] sm:text-xs text-slate-500 truncate">
-            {documentData?.file_name || 'Memuat dokumen...'} <span className="text-slate-300">|</span> Kirim ke <b className="text-slate-600">{recipientEmail}</b>
+            {documentMeta?.document.file_name} <span className="text-slate-300">|</span> {isViewer ? 'Mode Lihat Saja' : `Masuk sebagai ${profile?.full_name}`}
           </p>
         </div>
         <div className="hidden sm:flex items-center gap-1 bg-slate-100 rounded-full px-1 py-1 border border-slate-200 shrink-0">
@@ -412,12 +361,14 @@ export default function SignDocumentPage() {
                 <span className="text-[11px] font-bold text-slate-500 bg-slate-300/70 px-2 py-0.5 rounded">
                   Halaman {pageObj.pageNumber}
                 </span>
-                <button
-                  onClick={() => handlePageButtonClick(pageObj.pageNumber)}
-                  className={`text-[11px] font-bold px-2.5 py-1 rounded-full text-white shadow-sm transition-colors ${isTargetPage ? 'bg-emerald-600' : 'bg-blue-600 hover:bg-blue-700'}`}
-                >
-                  {isTargetPage ? '✓ TTD di sini' : signatureImage ? 'Taruh TTD di sini' : '+ Tanda tangan di sini'}
-                </button>
+                {!isViewer && (
+                  <button
+                    onClick={() => handlePageButtonClick(pageObj.pageNumber)}
+                    className={`text-[11px] font-bold px-2.5 py-1 rounded-full text-white shadow-sm transition-colors ${isTargetPage ? 'bg-emerald-600' : 'bg-blue-600 hover:bg-blue-700'}`}
+                  >
+                    {isTargetPage ? '✓ TTD di sini' : signatureImage ? 'Taruh TTD di sini' : '+ Tanda tangan di sini'}
+                  </button>
+                )}
               </div>
 
               <div
@@ -427,7 +378,7 @@ export default function SignDocumentPage() {
               >
                 <canvas id={`pdf-canvas-p-${pageObj.pageNumber}`} className="block w-full h-auto" />
 
-                {isTargetPage && signatureImage && (
+                {!isViewer && isTargetPage && signatureImage && (
                   <div
                     onMouseDown={handleStart}
                     onTouchStart={handleStart}
@@ -441,7 +392,7 @@ export default function SignDocumentPage() {
                       backgroundColor: isDraggingActive ? 'rgba(219, 234, 254, 0.4)' : 'rgba(240, 253, 244, 0.25)',
                       opacity: isDraggingActive ? 0.55 : 1,
                       zIndex: 20,
-                      touchAction: 'none'
+                      touchAction: 'none',
                     }}
                   >
                     <button
@@ -486,40 +437,38 @@ export default function SignDocumentPage() {
         )}
       </main>
 
-      {/* Kontrol zoom mengambang, mudah dijangkau ibu jari di HP */}
       <div className="fixed right-3 bottom-24 sm:bottom-28 z-40 flex flex-col items-center bg-white/95 backdrop-blur rounded-full shadow-lg border border-slate-200 overflow-hidden sm:hidden">
         <button onClick={zoomIn} className="w-10 h-10 text-slate-700 font-bold text-lg">+</button>
         <button onClick={resetZoom} className="w-10 h-8 text-[10px] font-semibold text-slate-500 border-y border-slate-100">{Math.round(zoomScale * 100)}%</button>
         <button onClick={zoomOut} className="w-10 h-10 text-slate-700 font-bold text-lg">−</button>
       </div>
 
-      <footer
-        className="shrink-0 z-30 bg-white border-t border-slate-200 px-3 sm:px-5 py-3 flex items-center justify-between gap-3"
-        style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}
-      >
-        {!signatureImage ? (
-          <button
-            onClick={openSignatureModal}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg py-3 text-sm shadow"
-          >
-            ✍️ Tempatkan Tanda Tangan
-          </button>
-        ) : (
-          <>
-            <button onClick={openSignatureModal} className="flex items-center gap-2 shrink-0">
-              <img src={signatureImage} alt="TTD" className="h-8 w-14 object-contain border border-slate-200 rounded bg-slate-50" />
-              <span className="text-xs font-semibold text-blue-600">Ganti</span>
+      {!isViewer && (
+        <footer
+          className="shrink-0 z-30 bg-white border-t border-slate-200 px-3 sm:px-5 py-3 flex items-center justify-between gap-3"
+          style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}
+        >
+          {!signatureImage ? (
+            <button onClick={openSignatureModal} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg py-3 text-sm shadow">
+              ✍️ Tempatkan Tanda Tangan
             </button>
-            <button
-              onClick={handleSubmitSignature}
-              disabled={submitting || !activePageTarget}
-              className="flex-1 max-w-[240px] bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-lg py-3 text-sm shadow"
-            >
-              {submitting ? 'Menyimpan...' : !activePageTarget ? 'Pilih halaman dulu' : '💾 Selesai & Kirim'}
-            </button>
-          </>
-        )}
-      </footer>
+          ) : (
+            <>
+              <button onClick={openSignatureModal} className="flex items-center gap-2 shrink-0">
+                <img src={signatureImage} alt="TTD" className="h-8 w-14 object-contain border border-slate-200 rounded bg-slate-50" />
+                <span className="text-xs font-semibold text-blue-600">Ganti</span>
+              </button>
+              <button
+                onClick={handleSubmitSignature}
+                disabled={submitting || !activePageTarget}
+                className="flex-1 max-w-[240px] bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-lg py-3 text-sm shadow"
+              >
+                {submitting ? 'Menyimpan...' : !activePageTarget ? 'Pilih halaman dulu' : '💾 Selesai & Kirim'}
+              </button>
+            </>
+          )}
+        </footer>
+      )}
 
       {toast && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-slate-900 text-white text-xs font-medium px-4 py-2 rounded-full shadow-lg">
@@ -531,53 +480,18 @@ export default function SignDocumentPage() {
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl w-full max-w-md p-5 shadow-xl">
             <h3 className="text-base font-bold text-slate-800 mb-3">Pilih Metode Tanda Tangan</h3>
-
-            <div className="flex border-b-2 border-slate-100 mb-4">
-              <button
-                onClick={() => setSignMethod('draw')}
-                className={`flex-1 py-2 font-bold text-sm ${signMethod === 'draw' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-slate-400'}`}
-              >🖊️ Garis / Coret</button>
-              <button
-                onClick={() => setSignMethod('upload')}
-                className={`flex-1 py-2 font-bold text-sm ${signMethod === 'upload' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-slate-400'}`}
-              >📁 Unggah Gambar</button>
-            </div>
-
-            {signMethod === 'draw' && (
-              <div>
-                <canvas
-                  ref={signatureCanvasRef} width={380} height={180}
-                  onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseLeave={stopDrawing}
-                  onTouchStart={startDrawing} onTouchMove={draw} onTouchEnd={stopDrawing}
-                  className="border border-slate-300 rounded-lg bg-slate-50 w-full h-[180px] block"
-                  style={{ touchAction: 'none' }}
-                />
-                <div className="mt-4 flex justify-between">
-                  <button onClick={clearCanvas} className="px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg text-xs font-semibold">Hapus</button>
-                  <div className="flex gap-2">
-                    <button onClick={() => setIsModalOpen(false)} className="px-3 py-2 bg-slate-500 hover:bg-slate-600 text-white rounded-lg text-xs font-semibold">Batal</button>
-                    <button onClick={saveCanvasImage} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold">Terapkan</button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {signMethod === 'upload' && (
-              <div className="text-center py-2">
-                <p className="text-xs text-slate-500 mb-3">Pilih gambar tanda tangan. Latar belakang putih otomatis dihapus.</p>
-                <input type="file" ref={fileInputRef} accept="image/*" onChange={handleImageUpload} className="hidden" />
-                <button
-                  onClick={() => fileInputRef.current.click()}
-                  className="w-full py-4 bg-slate-50 border-2 border-dashed border-slate-300 rounded-lg text-sm font-medium text-slate-600"
-                >🔍 Cari File Foto TTD</button>
-                <div className="mt-5 text-right">
-                  <button onClick={() => setIsModalOpen(false)} className="px-3 py-2 bg-slate-500 hover:bg-slate-600 text-white rounded-lg text-xs font-semibold">Batal</button>
-                </div>
-              </div>
-            )}
+            <SignaturePad onSave={finalizeSignature} onCancel={() => setIsModalOpen(false)} />
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+export default function SignDocumentPage() {
+  return (
+    <RequireAuth>
+      <SignPageContent />
+    </RequireAuth>
   );
 }
