@@ -16,9 +16,13 @@ if (typeof window !== 'undefined' && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
 
 const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 3.5;
-const MIN_SIG_PERCENT = 8;
-const MAX_SIG_PERCENT = 32;
+const MIN_SIG_PERCENT = 6;
+const MAX_SIG_PERCENT = 40;
 const DEFAULT_SIG_PERCENT = 15;
+
+function newPlacementId() {
+  return typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `p-${Date.now()}-${Math.random()}`;
+}
 
 function SignPageContent() {
   const { id } = useParams();
@@ -38,12 +42,13 @@ function SignPageContent() {
   const [pageJumpValue, setPageJumpValue] = useState('');
 
   const [signatureImage, setSignatureImage] = useState(null);
-  const [activePageTarget, setActivePageTarget] = useState(null);
-  const [position, setPosition] = useState({ x: 60, y: 78 });
-  const [sigWidthPercent, setSigWidthPercent] = useState(DEFAULT_SIG_PERCENT);
-  const [isDraggingActive, setIsDraggingActive] = useState(false);
+  // Setiap penempatan TTD independen: bisa lebih dari satu, di halaman berbeda-beda.
+  const [placements, setPlacements] = useState([]); // [{ id, pageNumber, x, y, widthPercent }]
+  const [activeDragId, setActiveDragId] = useState(null);
+  const [activeResizeId, setActiveResizeId] = useState(null);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [modalIntent, setModalIntent] = useState({ type: 'addToPage', pageNumber: null });
 
   const [submitting, setSubmitting] = useState(false);
   const [submitSuccess, setSubmitSuccess] = useState(false);
@@ -56,7 +61,10 @@ function SignPageContent() {
 
   const isDragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
-  const positionStart = useRef({ x: 60, y: 78 });
+  const positionStart = useRef({ x: 0, y: 0 });
+
+  const isResizing = useRef(false);
+  const resizeStart = useRef({ x: 0, widthPercent: DEFAULT_SIG_PERCENT, containerWidth: 1 });
 
   const showToast = useCallback((message) => {
     setToast({ message });
@@ -173,44 +181,52 @@ function SignPageContent() {
     setPageJumpOpen(false);
   };
 
+  const addPlacementToPage = (pageNum) => {
+    setPlacements((prev) => [...prev, { id: newPlacementId(), pageNumber: pageNum, x: 60, y: 78, widthPercent: DEFAULT_SIG_PERCENT }]);
+  };
+
   const finalizeSignature = (dataUrl) => {
     setSignatureImage(dataUrl);
     setIsModalOpen(false);
-    setActivePageTarget((prev) => prev || currentVisiblePage);
-    setPosition({ x: 60, y: 78 });
-  };
-
-  const openSignatureModal = () => {
-    setActivePageTarget((prev) => prev || currentVisiblePage);
-    setIsModalOpen(true);
+    if (modalIntent.type === 'addToPage') {
+      addPlacementToPage(modalIntent.pageNumber || currentVisiblePage);
+    }
   };
 
   const handlePageButtonClick = (pageNum) => {
     if (!signatureImage) {
-      setActivePageTarget(pageNum);
+      setModalIntent({ type: 'addToPage', pageNumber: pageNum });
       setIsModalOpen(true);
     } else {
-      setActivePageTarget(pageNum);
-      setPosition({ x: 60, y: 78 });
+      addPlacementToPage(pageNum);
     }
   };
 
-  const detachSignatureFromPage = () => setActivePageTarget(null);
+  const openChangeSignatureModal = () => {
+    setModalIntent({ type: 'replaceImage' });
+    setIsModalOpen(true);
+  };
 
-  const handleStart = (e) => {
+  const removePlacement = (placementId) => setPlacements((prev) => prev.filter((p) => p.id !== placementId));
+
+  // --- Seret (drag) satu penempatan TTD, posisi dalam persen relatif terhadap halamannya (independen dari zoom) ---
+  const handleDragStart = (e, placementId) => {
     if (e.target.className?.includes?.('nodrag')) return;
     isDragging.current = true;
-    setIsDraggingActive(true);
+    setActiveDragId(placementId);
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
     dragStart.current = { x: clientX, y: clientY };
-    positionStart.current = { ...position };
+    const placement = placements.find((p) => p.id === placementId);
+    positionStart.current = { x: placement.x, y: placement.y };
     if (e.cancelable) e.preventDefault();
   };
 
-  const handleMove = (e) => {
-    if (!isDragging.current || !activePageTarget) return;
-    const container = pageRefs.current[activePageTarget];
+  const handleDragMove = (e) => {
+    if (!isDragging.current || !activeDragId) return;
+    const placement = placements.find((p) => p.id === activeDragId);
+    if (!placement) return;
+    const container = pageRefs.current[placement.pageNumber];
     if (!container) return;
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
@@ -221,15 +237,45 @@ function SignPageContent() {
     let newY = positionStart.current.y + (deltaY / rect.height) * 100;
     if (newX < 0) newX = 0; if (newY < 0) newY = 0;
     if (newX > 90) newX = 90; if (newY > 95) newY = 95;
-    setPosition({ x: newX, y: newY });
+    setPlacements((prev) => prev.map((p) => (p.id === activeDragId ? { ...p, x: newX, y: newY } : p)));
   };
 
-  const handleEnd = () => { isDragging.current = false; setIsDraggingActive(false); };
+  const handleDragEnd = () => { isDragging.current = false; setActiveDragId(null); };
 
+  // --- Ubah ukuran lewat gagang anak panah di sudut kanan bawah: ditarik keluar makin besar, ditarik ke dalam makin kecil ---
+  const handleResizeStart = (e, placementId) => {
+    e.stopPropagation();
+    isResizing.current = true;
+    setActiveResizeId(placementId);
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const placement = placements.find((p) => p.id === placementId);
+    const container = pageRefs.current[placement.pageNumber];
+    const rect = container.getBoundingClientRect();
+    resizeStart.current = { x: clientX, widthPercent: placement.widthPercent, containerWidth: rect.width };
+    if (e.cancelable) e.preventDefault();
+  };
+
+  const handleResizeMove = (e) => {
+    if (!isResizing.current || !activeResizeId) return;
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const deltaX = clientX - resizeStart.current.x;
+    const deltaPercent = (deltaX / resizeStart.current.containerWidth) * 100;
+    let newWidthPercent = resizeStart.current.widthPercent + deltaPercent;
+    newWidthPercent = Math.min(MAX_SIG_PERCENT, Math.max(MIN_SIG_PERCENT, newWidthPercent));
+    setPlacements((prev) => prev.map((p) => (p.id === activeResizeId ? { ...p, widthPercent: newWidthPercent } : p)));
+  };
+
+  const handleResizeEnd = () => { isResizing.current = false; setActiveResizeId(null); };
+
+  // Dengarkan gerakan di seluruh window (bukan hanya di dalam kotak TTD) selama drag/resize,
+  // supaya gerakan cepat tidak menghentikan proses lebih awal.
   useEffect(() => {
-    if (!isDraggingActive) return;
-    const onMove = (e) => handleMove(e);
-    const onUp = () => handleEnd();
+    if (!activeDragId && !activeResizeId) return;
+    const onMove = (e) => {
+      if (activeDragId) handleDragMove(e);
+      if (activeResizeId) handleResizeMove(e);
+    };
+    const onUp = () => { handleDragEnd(); handleResizeEnd(); };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     window.addEventListener('touchmove', onMove, { passive: false });
@@ -240,10 +286,10 @@ function SignPageContent() {
       window.removeEventListener('touchmove', onMove);
       window.removeEventListener('touchend', onUp);
     };
-  }, [isDraggingActive, activePageTarget]);
+  }, [activeDragId, activeResizeId]);
 
   const handleSubmitSignature = async () => {
-    if (!signatureImage || !activePageTarget) return showToast('Silakan pasang tanda tangan Anda terlebih dahulu.');
+    if (!signatureImage || placements.length === 0) return showToast('Tempatkan minimal 1 tanda tangan terlebih dahulu.');
     setSubmitting(true);
     try {
       const res = await authedFetch('/api/sign', {
@@ -251,10 +297,12 @@ function SignPageContent() {
         body: JSON.stringify({
           documentId: id,
           signatureImage,
-          percentX: position.x,
-          percentY: position.y,
-          pageNumber: activePageTarget,
-          percentWidth: sigWidthPercent,
+          placements: placements.map((p) => ({
+            pageNumber: p.pageNumber,
+            percentX: p.x,
+            percentY: p.y,
+            percentWidth: p.widthPercent,
+          })),
         }),
       });
       if (res.ok) {
@@ -349,7 +397,7 @@ function SignPageContent() {
         )}
 
         {!pdfRenderLoading && pdfPages.map((pageObj) => {
-          const isTargetPage = activePageTarget === pageObj.pageNumber;
+          const pagePlacements = placements.filter((p) => p.pageNumber === pageObj.pageNumber);
           return (
             <div
               key={pageObj.pageNumber}
@@ -364,9 +412,9 @@ function SignPageContent() {
                 {!isViewer && (
                   <button
                     onClick={() => handlePageButtonClick(pageObj.pageNumber)}
-                    className={`text-[11px] font-bold px-2.5 py-1 rounded-full text-white shadow-sm transition-colors ${isTargetPage ? 'bg-emerald-600' : 'bg-blue-600 hover:bg-blue-700'}`}
+                    className="text-[11px] font-bold px-2.5 py-1 rounded-full text-white shadow-sm transition-colors bg-blue-600 hover:bg-blue-700"
                   >
-                    {isTargetPage ? '✓ TTD di sini' : signatureImage ? 'Taruh TTD di sini' : '+ Tanda tangan di sini'}
+                    {pagePlacements.length > 0 ? `+ Tambah lagi (${pagePlacements.length})` : '+ Tempatkan TTD di sini'}
                   </button>
                 )}
               </div>
@@ -378,38 +426,42 @@ function SignPageContent() {
               >
                 <canvas id={`pdf-canvas-p-${pageObj.pageNumber}`} className="block w-full h-auto" />
 
-                {!isViewer && isTargetPage && signatureImage && (
-                  <div
-                    onMouseDown={handleStart}
-                    onTouchStart={handleStart}
-                    className="absolute rounded-lg cursor-move transition-opacity"
-                    style={{
-                      left: `${position.x}%`,
-                      top: `${position.y}%`,
-                      width: `${(sigWidthPercent / 100) * pageObj.viewport.width}px`,
-                      padding: '6px',
-                      border: isDraggingActive ? '2px dashed #3b82f6' : '2px dashed #16a34a',
-                      backgroundColor: isDraggingActive ? 'rgba(219, 234, 254, 0.4)' : 'rgba(240, 253, 244, 0.25)',
-                      opacity: isDraggingActive ? 0.55 : 1,
-                      zIndex: 20,
-                      touchAction: 'none',
-                    }}
-                  >
-                    <button
-                      onClick={detachSignatureFromPage}
-                      className="nodrag absolute -top-2.5 -right-2.5 w-5 h-5 rounded-full bg-slate-700 text-white text-[10px] leading-5 text-center shadow"
-                      title="Lepas dari halaman ini"
-                    >✕</button>
-                    <img src={signatureImage} alt="Signature" className="w-full block pointer-events-none" style={{ mixBlendMode: 'multiply' }} />
-                    <div className="nodrag bg-white/95 backdrop-blur rounded p-1 border border-slate-200 mt-1">
-                      <input
-                        type="range" min={MIN_SIG_PERCENT} max={MAX_SIG_PERCENT} step={0.5} value={sigWidthPercent}
-                        onChange={(e) => setSigWidthPercent(Number(e.target.value))}
-                        className="nodrag w-full block"
-                      />
+                {!isViewer && signatureImage && pagePlacements.map((placement) => {
+                  const isDraggingThis = activeDragId === placement.id;
+                  return (
+                    <div
+                      key={placement.id}
+                      onMouseDown={(e) => handleDragStart(e, placement.id)}
+                      onTouchStart={(e) => handleDragStart(e, placement.id)}
+                      className="absolute rounded-lg cursor-move transition-opacity"
+                      style={{
+                        left: `${placement.x}%`,
+                        top: `${placement.y}%`,
+                        width: `${(placement.widthPercent / 100) * pageObj.viewport.width}px`,
+                        padding: '6px',
+                        border: isDraggingThis ? '2px dashed #3b82f6' : '2px dashed #16a34a',
+                        backgroundColor: isDraggingThis ? 'rgba(219, 234, 254, 0.4)' : 'rgba(240, 253, 244, 0.25)',
+                        opacity: isDraggingThis ? 0.55 : 1,
+                        zIndex: 20,
+                        touchAction: 'none',
+                      }}
+                    >
+                      <button
+                        onClick={() => removePlacement(placement.id)}
+                        className="nodrag absolute -top-2.5 -right-2.5 w-5 h-5 rounded-full bg-slate-700 text-white text-[10px] leading-5 text-center shadow"
+                        title="Hapus penempatan ini"
+                      >✕</button>
+                      <img src={signatureImage} alt="Signature" className="w-full block pointer-events-none" style={{ mixBlendMode: 'multiply' }} />
+                      <div
+                        onMouseDown={(e) => handleResizeStart(e, placement.id)}
+                        onTouchStart={(e) => handleResizeStart(e, placement.id)}
+                        className="nodrag absolute -bottom-2.5 -right-2.5 w-6 h-6 bg-white border border-slate-300 rounded-full shadow flex items-center justify-center text-slate-500 text-xs font-bold"
+                        style={{ cursor: 'nwse-resize' }}
+                        title="Tarik untuk mengubah ukuran"
+                      >⤡</div>
                     </div>
-                  </div>
-                )}
+                  );
+                })}
               </div>
             </div>
           );
@@ -449,21 +501,24 @@ function SignPageContent() {
           style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}
         >
           {!signatureImage ? (
-            <button onClick={openSignatureModal} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg py-3 text-sm shadow">
+            <button
+              onClick={() => { setModalIntent({ type: 'addToPage', pageNumber: currentVisiblePage }); setIsModalOpen(true); }}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg py-3 text-sm shadow"
+            >
               ✍️ Tempatkan Tanda Tangan
             </button>
           ) : (
             <>
-              <button onClick={openSignatureModal} className="flex items-center gap-2 shrink-0">
+              <button onClick={openChangeSignatureModal} className="flex items-center gap-2 shrink-0">
                 <img src={signatureImage} alt="TTD" className="h-8 w-14 object-contain border border-slate-200 rounded bg-slate-50" />
                 <span className="text-xs font-semibold text-blue-600">Ganti</span>
               </button>
               <button
                 onClick={handleSubmitSignature}
-                disabled={submitting || !activePageTarget}
+                disabled={submitting || placements.length === 0}
                 className="flex-1 max-w-[240px] bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-lg py-3 text-sm shadow"
               >
-                {submitting ? 'Menyimpan...' : !activePageTarget ? 'Pilih halaman dulu' : '💾 Selesai & Kirim'}
+                {submitting ? 'Menyimpan...' : placements.length === 0 ? 'Tempatkan TTD dulu' : `💾 Selesai & Kirim (${placements.length})`}
               </button>
             </>
           )}

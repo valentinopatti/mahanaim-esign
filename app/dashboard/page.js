@@ -6,6 +6,13 @@ import RequireAuth from '../components/RequireAuth';
 import AppHeader from '../components/AppHeader';
 import { authedFetch } from '../lib/authedFetch';
 
+function formatDateTime(iso) {
+  return new Date(iso).toLocaleString('id-ID', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+}
+
 function StatusBadge({ status }) {
   const map = {
     pending: ['Belum dikirim', 'bg-slate-100 text-slate-600'],
@@ -87,11 +94,23 @@ export default function DashboardPage() {
                     <Link href={`/sign/${doc.id}`} className="text-sm font-semibold text-slate-800 hover:text-blue-600">{doc.file_name}</Link>
                     <StatusBadge status={doc.status === 'completed' ? 'signed' : doc.status === 'in_progress' ? 'notified' : 'pending'} />
                   </div>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex flex-col gap-1.5">
                     {doc.document_recipients.map((r) => (
-                      <span key={r.id} className="text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-full px-2 py-0.5">
-                        {r.profiles.full_name} ({r.role === 'signer' ? 'TTD' : 'Lihat'}): {r.status}
-                      </span>
+                      <div key={r.id} className="text-[11px] bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-slate-700">
+                            {r.profiles.full_name} <span className="font-normal text-slate-400">({r.role === 'signer' ? 'TTD' : 'Lihat'})</span>
+                          </span>
+                          <StatusBadge status={r.status} />
+                        </div>
+                        {(r.viewed_at || r.signed_at) && (
+                          <div className="text-slate-400 mt-0.5">
+                            {r.viewed_at && <span>Dilihat: {formatDateTime(r.viewed_at)}</span>}
+                            {r.viewed_at && r.signed_at && <span> &middot; </span>}
+                            {r.signed_at && <span>TTD: {formatDateTime(r.signed_at)}</span>}
+                          </div>
+                        )}
+                      </div>
                     ))}
                   </div>
                 </div>

@@ -25,12 +25,16 @@ export async function GET(request, { params }) {
 
   if (!isOwner && !myRecipient) return forbidden('Anda tidak memiliki akses ke dokumen ini.');
 
-  if (myRecipient && myRecipient.status !== 'signed') {
+  if (myRecipient && myRecipient.status === 'notified') {
+    const viewedAt = new Date().toISOString();
     await supabaseAdmin
       .from('document_recipients')
-      .update({ status: myRecipient.status === 'notified' ? 'viewed' : myRecipient.status })
+      .update({ status: 'viewed', viewed_at: viewedAt })
       .eq('id', myRecipient.id)
       .eq('status', 'notified');
+    await supabaseAdmin.from('document_events').insert([{ document_id: id, recipient_id: myRecipient.id, event_type: 'viewed' }]);
+    myRecipient.status = 'viewed';
+    myRecipient.viewed_at = viewedAt;
   }
 
   const blockingSigner = myRecipient && myRecipient.role === 'signer' && myRecipient.status === 'waiting'

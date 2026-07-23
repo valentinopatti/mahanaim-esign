@@ -11,7 +11,11 @@ export async function POST(request) {
   const auth = await getUserFromRequest(request);
   if (!auth) return unauthorized();
 
-  const { documentId, signatureImage, percentX, percentY, pageNumber, percentWidth } = await request.json();
+  const { documentId, signatureImage, placements } = await request.json();
+
+  if (!Array.isArray(placements) || placements.length === 0) {
+    return new Response(JSON.stringify({ error: 'Tempatkan minimal 1 tanda tangan sebelum mengirim.' }), { status: 400 });
+  }
 
   const { data: doc, error: docError } = await supabaseAdmin
     .from('documents')
@@ -33,40 +37,45 @@ export async function POST(request) {
   if (me.status === 'signed') return new Response(JSON.stringify({ error: 'Anda sudah menandatangani dokumen ini.' }), { status: 400 });
   if (me.status === 'waiting') return forbidden('Belum giliran Anda untuk menandatangani.');
 
-  // --- Cetak tanda tangan ke PDF (persentase terhadap ukuran halaman, sudah diverifikasi zoom-invariant) ---
+  // --- Cetak tanda tangan ke PDF, satu per penempatan (persentase terhadap ukuran halaman, zoom-invariant) ---
   const pdfBase64Raw = doc.current_file_url.split(';base64,')[1] || doc.current_file_url;
   const pdfDoc = await PDFDocument.load(Buffer.from(pdfBase64Raw, 'base64'));
   const pages = pdfDoc.getPages();
-  const targetPage = pages[pageNumber - 1];
-  const { width: pageWidth, height: pageHeight } = targetPage.getSize();
-  const pageRotation = targetPage.getRotation().angle;
 
   const sigImageRaw = signatureImage.split(';base64,')[1] || signatureImage;
   const embeddedImage = await pdfDoc.embedPng(Buffer.from(sigImageRaw, 'base64'));
-
-  const clampedPercentWidth = Math.min(45, Math.max(5, Number(percentWidth) || 12));
-  const ttdWidth = pageWidth * (clampedPercentWidth / 100);
   const aspectRatio = embeddedImage.height / embeddedImage.width;
-  const ttdHeight = ttdWidth * aspectRatio;
 
-  let finalX = (percentX / 100) * pageWidth;
-  let finalY = pageHeight - ((percentY / 100) * pageHeight) - ttdHeight;
-  let finalRotation = 0;
+  for (const placement of placements) {
+    const { pageNumber, percentX, percentY, percentWidth } = placement;
+    const targetPage = pages[pageNumber - 1];
+    if (!targetPage) continue;
+    const { width: pageWidth, height: pageHeight } = targetPage.getSize();
+    const pageRotation = targetPage.getRotation().angle;
 
-  if (pageRotation === 90) {
-    const temp = finalX; finalX = finalY; finalY = temp; finalRotation = -90;
-  } else if (pageRotation === 180) {
-    finalX = pageWidth - finalX - ttdWidth; finalRotation = 180;
-  } else if (pageRotation === 270) {
-    finalX = pageHeight - finalY - ttdHeight; finalY = pageWidth - finalX - ttdWidth; finalRotation = 90;
+    const clampedPercentWidth = Math.min(45, Math.max(5, Number(percentWidth) || 12));
+    const ttdWidth = pageWidth * (clampedPercentWidth / 100);
+    const ttdHeight = ttdWidth * aspectRatio;
+
+    let finalX = (percentX / 100) * pageWidth;
+    let finalY = pageHeight - ((percentY / 100) * pageHeight) - ttdHeight;
+    let finalRotation = 0;
+
+    if (pageRotation === 90) {
+      const temp = finalX; finalX = finalY; finalY = temp; finalRotation = -90;
+    } else if (pageRotation === 180) {
+      finalX = pageWidth - finalX - ttdWidth; finalRotation = 180;
+    } else if (pageRotation === 270) {
+      finalX = pageHeight - finalY - ttdHeight; finalY = pageWidth - finalX - ttdWidth; finalRotation = 90;
+    }
+
+    if (finalX < 5) finalX = 5;
+    if (finalY < 5) finalY = 5;
+    if (finalX + ttdWidth > pageWidth) finalX = pageWidth - ttdWidth - 5;
+    if (finalY + ttdHeight > pageHeight) finalY = pageHeight - ttdHeight - 5;
+
+    targetPage.drawImage(embeddedImage, { x: finalX, y: finalY, width: ttdWidth, height: ttdHeight, rotate: degrees(finalRotation) });
   }
-
-  if (finalX < 5) finalX = 5;
-  if (finalY < 5) finalY = 5;
-  if (finalX + ttdWidth > pageWidth) finalX = pageWidth - ttdWidth - 5;
-  if (finalY + ttdHeight > pageHeight) finalY = pageHeight - ttdHeight - 5;
-
-  targetPage.drawImage(embeddedImage, { x: finalX, y: finalY, width: ttdWidth, height: ttdHeight, rotate: degrees(finalRotation) });
 
   const modifiedPdfBytes = await pdfDoc.save();
   const modifiedPdfBase64 = `data:application/pdf;base64,${Buffer.from(modifiedPdfBytes).toString('base64')}`;
@@ -81,6 +90,16 @@ export async function POST(request) {
     .from('document_recipients')
     .update({ status: 'signed', signed_at: new Date().toISOString() })
     .eq('id', me.id);
+
+  await supabaseAdmin.from('document_signatures').insert(
+    placements.map((p) => ({
+      document_recipient_id: me.id,
+      page_number: p.pageNumber,
+      percent_x: p.percentX,
+      percent_y: p.percentY,
+      percent_width: p.percentWidth,
+    }))
+  );
 
   await supabaseAdmin.from('document_events').insert([{ document_id: documentId, recipient_id: me.id, event_type: 'signed' }]);
 
