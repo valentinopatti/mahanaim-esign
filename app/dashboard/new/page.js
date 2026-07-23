@@ -13,6 +13,7 @@ export default function NewDocumentPage() {
   const [file, setFile] = useState(null);
   const [numPages, setNumPages] = useState(null);
   const [signingMode, setSigningMode] = useState('parallel');
+  const [message, setMessage] = useState('');
   const [recipients, setRecipients] = useState([]);
   const [requiredPagesByUser, setRequiredPagesByUser] = useState({});
   const [pickUserId, setPickUserId] = useState('');
@@ -91,6 +92,7 @@ export default function NewDocumentPage() {
     formData.append('signing_mode', signingMode);
     formData.append('recipients', JSON.stringify(recipients.map(({ user_id, role, order_index }) => ({ user_id, role, order_index }))));
     formData.append('required_pages', JSON.stringify(requiredPagesByUser));
+    formData.append('message', message);
 
     const res = await authedFetch('/api/documents', { method: 'POST', body: formData });
     setSubmitting(false);
@@ -132,7 +134,17 @@ export default function NewDocumentPage() {
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-slate-600 mb-2">3. Tambah Penerima</label>
+              <label className="block text-xs font-bold text-slate-600 mb-1">3. Pesan untuk Penerima (opsional)</label>
+              <textarea
+                value={message} onChange={(e) => setMessage(e.target.value)}
+                maxLength={2000} rows={3}
+                placeholder="Tulis catatan singkat untuk penerima, mis. konteks dokumen atau batas waktu..."
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm resize-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-600 mb-2">4. Tambah Penerima</label>
               <div className="flex gap-2 mb-3">
                 <select value={pickUserId} onChange={(e) => setPickUserId(e.target.value)} className="flex-1 border border-slate-300 rounded-lg px-2 py-2 text-sm">
                   <option value="">Pilih orang...</option>

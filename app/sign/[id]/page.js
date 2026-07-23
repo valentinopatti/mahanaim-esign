@@ -489,6 +489,15 @@ function SignPageContent() {
           </div>
         )}
 
+        {!pdfRenderLoading && documentMeta?.document.message && (
+          <div className="mx-auto mb-4 max-w-xl rounded-xl bg-white border border-slate-200 shadow-sm p-3 text-sm">
+            <p className="text-[11px] font-bold text-slate-500 mb-1">
+              Pesan dari {documentMeta.document.profiles?.full_name || 'pengirim'}:
+            </p>
+            <p className="text-slate-700 whitespace-pre-wrap">{documentMeta.document.message}</p>
+          </div>
+        )}
+
         {!pdfRenderLoading && isAlreadySigned && (
           <div className={`sticky top-0 z-30 mx-auto mb-4 max-w-fit rounded-full px-3 py-1.5 text-xs font-semibold shadow ${canRetract ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
             {canRetract

@@ -6,6 +6,15 @@ function appBaseUrl(request) {
   return process.env.NEXT_PUBLIC_APP_URL || new URL(request.url).origin;
 }
 
+function escapeHtml(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export async function GET(request) {
   const auth = await getUserFromRequest(request);
   if (!auth) return unauthorized();
@@ -34,6 +43,7 @@ export async function POST(request) {
   const formData = await request.formData();
   const file = formData.get('file');
   const signingMode = formData.get('signing_mode') === 'sequential' ? 'sequential' : 'parallel';
+  const message = (formData.get('message') || '').toString().trim().slice(0, 2000) || null;
   let recipients;
   let requiredPages;
   try {
@@ -69,6 +79,7 @@ export async function POST(request) {
       current_file_url: fileBase64,
       signing_mode: signingMode,
       status: 'sent',
+      message,
     }])
     .select()
     .single();
@@ -121,6 +132,7 @@ export async function POST(request) {
         <div style="font-family: sans-serif; color: #333;">
           <p>Halo ${recipient.profiles.full_name},</p>
           <p><b>${auth.profile.full_name}</b> mengirimkan dokumen <b>${doc.file_name}</b> yang perlu Anda ${roleLabel}.</p>
+          ${message ? `<p style="background:#f0fdf4;border-left:4px solid #16a34a;padding:10px;margin:12px 0;">"${escapeHtml(message).replace(/\n/g, '<br>')}"</p>` : ''}
           <p><a href="${baseUrl}/sign/${doc.id}">Buka dokumen</a></p>
         </div>
       `,
