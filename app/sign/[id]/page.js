@@ -203,6 +203,27 @@ function SignPageContent() {
     setPlacements((prev) => [...prev, { id: newPlacementId(), pageNumber: pageNum, x: 60, y: 78, widthPercent: DEFAULT_SIG_PERCENT }]);
   };
 
+  // Menghitung halaman yang benar-benar terlihat SEKARANG lewat pengukuran posisi langsung,
+  // bukan mengandalkan state currentVisiblePage yang bisa terlambat mengikuti (terutama saat
+  // scroll cepat/inertia di HP) — ini yang menyebabkan salah halaman saat "Sign This Page" diklik.
+  const getCurrentPageNow = () => {
+    const container = scrollContainerRef.current;
+    if (!container || pdfPages.length === 0) return currentVisiblePage;
+    const containerRect = container.getBoundingClientRect();
+    const referenceY = containerRect.top + containerRect.height / 2;
+    let bestPage = pdfPages[0].pageNumber;
+    let bestDistance = Infinity;
+    for (const pageObj of pdfPages) {
+      const el = pageRefs.current[pageObj.pageNumber];
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.top <= referenceY && rect.bottom >= referenceY) return pageObj.pageNumber;
+      const distance = Math.min(Math.abs(rect.top - referenceY), Math.abs(rect.bottom - referenceY));
+      if (distance < bestDistance) { bestDistance = distance; bestPage = pageObj.pageNumber; }
+    }
+    return bestPage;
+  };
+
   // Perkiraan rasio tinggi/lebar gambar TTD, untuk memusatkan kotak TTD secara vertikal juga (bukan cuma horizontal).
   const getImageAspectRatio = (dataUrl) => new Promise((resolve) => {
     const img = new window.Image();
@@ -241,16 +262,17 @@ function SignPageContent() {
     setSignatureImage(dataUrl);
     setIsModalOpen(false);
     if (modalIntent.type === 'addToPage') {
-      addPlacementCenteredOnPage(modalIntent.pageNumber || currentVisiblePage, dataUrl);
+      addPlacementCenteredOnPage(modalIntent.pageNumber || getCurrentPageNow(), dataUrl);
     }
   };
 
   const handleSignThisPage = () => {
+    const pageNow = getCurrentPageNow();
     if (!signatureImage) {
-      setModalIntent({ type: 'addToPage', pageNumber: currentVisiblePage });
+      setModalIntent({ type: 'addToPage', pageNumber: pageNow });
       setIsModalOpen(true);
     } else {
-      addPlacementCenteredOnPage(currentVisiblePage, signatureImage);
+      addPlacementCenteredOnPage(pageNow, signatureImage);
     }
   };
 
@@ -376,6 +398,20 @@ function SignPageContent() {
     await loadDocument();
   };
 
+  // Selalu ambil versi PDF terbaru langsung dari server saat diunduh, supaya tidak
+  // bergantung pada state lokal yang mungkin belum sinkron dengan hasil tanda tangan terbaru.
+  const handleDownload = async () => {
+    const res = await authedFetch(`/api/documents/${id}`);
+    if (!res.ok) { showToast('Gagal mengunduh dokumen.'); return; }
+    const payload = await res.json();
+    const link = document.createElement('a');
+    link.href = payload.document.current_file_url;
+    link.download = payload.document.file_name || 'dokumen.pdf';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const handleRetract = async () => {
     if (!window.confirm('Yakin ingin membatalkan tanda tangan Anda pada dokumen ini?')) return;
     setRetracting(true);
@@ -441,13 +477,18 @@ function SignPageContent() {
           <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 text-3xl">✓</div>
           <h2 className="font-bold text-lg text-slate-800 mb-1">Dokumen Berhasil Ditandatangani</h2>
           <p className="text-sm text-slate-500 mb-5">{documentMeta?.document.file_name}</p>
-          <div className="flex gap-2">
-            <button onClick={() => router.push('/dashboard')} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg py-2.5 text-sm">
-              ← Dashboard
+          <div className="flex flex-col gap-2">
+            <button onClick={handleDownload} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg py-2.5 text-sm">
+              ⬇️ Download Dokumen
             </button>
-            <button onClick={handleViewSignedDocument} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg py-2.5 text-sm">
-              📄 Lihat Dokumen
-            </button>
+            <div className="flex gap-2">
+              <button onClick={() => router.push('/dashboard')} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg py-2.5 text-sm">
+                ← Dashboard
+              </button>
+              <button onClick={handleViewSignedDocument} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg py-2.5 text-sm">
+                📄 Lihat Dokumen
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -480,7 +521,7 @@ function SignPageContent() {
       <main
         ref={scrollContainerRef}
         className="relative flex-1 overflow-y-auto overflow-x-hidden bg-slate-200/70 px-2 sm:px-6 py-6"
-        style={{ WebkitOverflowScrolling: 'touch' }}
+        style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}
       >
         {pdfRenderLoading && (
           <div className="flex flex-col items-center justify-center h-full text-slate-500 text-sm gap-2">
@@ -623,6 +664,9 @@ function SignPageContent() {
             <>
               <button onClick={() => router.push('/dashboard')} className="text-sm font-bold text-slate-600 px-3 py-3">
                 ← Dashboard
+              </button>
+              <button onClick={handleDownload} className="flex-1 max-w-[220px] bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg py-3 text-sm shadow">
+                ⬇️ Download
               </button>
               {canRetract && (
                 <button

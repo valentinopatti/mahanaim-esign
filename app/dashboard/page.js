@@ -13,6 +13,15 @@ function formatDateTime(iso) {
   });
 }
 
+function downloadDocument(doc) {
+  const link = document.createElement('a');
+  link.href = doc.current_file_url;
+  link.download = doc.file_name || 'dokumen.pdf';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
 function StatusBadge({ status }) {
   const map = {
     pending: ['Belum dikirim', 'bg-slate-100 text-slate-600'],
@@ -90,9 +99,16 @@ export default function DashboardPage() {
               {(!data?.owned || data.owned.length === 0) && <p className="p-4 text-sm text-slate-400">Belum ada dokumen dikirim.</p>}
               {data?.owned.map((doc) => (
                 <div key={doc.id} className="p-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <Link href={`/sign/${doc.id}`} className="text-sm font-semibold text-slate-800 hover:text-blue-600">{doc.file_name}</Link>
-                    <StatusBadge status={doc.status === 'completed' ? 'signed' : doc.status === 'in_progress' ? 'notified' : 'pending'} />
+                  <div className="flex items-center justify-between mb-2 gap-2">
+                    <Link href={`/sign/${doc.id}`} className="text-sm font-semibold text-slate-800 hover:text-blue-600 truncate">{doc.file_name}</Link>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {doc.status === 'completed' && (
+                        <button onClick={() => downloadDocument(doc)} className="text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                          ⬇️ Download
+                        </button>
+                      )}
+                      <StatusBadge status={doc.status === 'completed' ? 'signed' : doc.status === 'in_progress' ? 'notified' : 'pending'} />
+                    </div>
                   </div>
                   <div className="flex flex-col gap-1.5">
                     {doc.document_recipients.map((r) => (
@@ -123,10 +139,15 @@ export default function DashboardPage() {
               <h2 className="text-sm font-bold text-slate-600 mb-2">Riwayat Saya</h2>
               <div className="bg-white rounded-xl border border-slate-200 divide-y divide-slate-100">
                 {doneAsSigner.map((r) => (
-                  <Link key={r.id} href={`/sign/${r.documents.id}`} className="flex items-center justify-between p-4 hover:bg-slate-50">
-                    <p className="text-sm text-slate-700">{r.documents.file_name}</p>
-                    <StatusBadge status={r.status} />
-                  </Link>
+                  <div key={r.id} className="flex items-center justify-between p-4 gap-2">
+                    <Link href={`/sign/${r.documents.id}`} className="text-sm text-slate-700 hover:text-blue-600 truncate">{r.documents.file_name}</Link>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button onClick={() => downloadDocument(r.documents)} className="text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                        ⬇️ Download
+                      </button>
+                      <StatusBadge status={r.status} />
+                    </div>
+                  </div>
                 ))}
               </div>
             </section>
