@@ -53,6 +53,8 @@ function SignPageContent() {
   const [toast, setToast] = useState(null);
 
   const scrollContainerRef = useRef(null);
+  const pagesWrapperRef = useRef(null);
+  const pinchState = useRef({ active: false, initialDistance: 0, initialZoom: 1 });
   const pageRefs = useRef({});
   const initializedZoom = useRef(false);
   const baseFitScale = useRef(1);
@@ -198,6 +200,67 @@ function SignPageContent() {
     pageRefs.current[num]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     setPageJumpOpen(false);
   };
+
+  // Pinch dua jari khusus mengubah ukuran area dokumen saja (lewat CSS transform, tanpa
+  // render ulang PDF.js di setiap gerakan jari supaya tetap mulus), bukan zoom bawaan browser
+  // yang tadinya ikut membesarkan tombol/header/footer. Ukuran final baru dikomit ke zoomScale
+  // (memicu render ulang PDF.js yang sesungguhnya, lebih tajam) begitu jari dilepas.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const getDistance = (touches) => {
+      const dx = touches[0].clientX - touches[1].clientX;
+      const dy = touches[0].clientY - touches[1].clientY;
+      return Math.sqrt(dx * dx + dy * dy);
+    };
+
+    const onTouchStart = (e) => {
+      if (e.touches.length !== 2) return;
+      pinchState.current.active = true;
+      pinchState.current.initialDistance = getDistance(e.touches);
+      pinchState.current.initialZoom = zoomScale;
+      const wrapper = pagesWrapperRef.current;
+      if (wrapper) {
+        const rect = wrapper.getBoundingClientRect();
+        const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        wrapper.style.transformOrigin = `${((midX - rect.left) / rect.width) * 100}% ${((midY - rect.top) / rect.height) * 100}%`;
+      }
+    };
+
+    const onTouchMove = (e) => {
+      if (!pinchState.current.active || e.touches.length !== 2) return;
+      e.preventDefault();
+      const factor = getDistance(e.touches) / pinchState.current.initialDistance;
+      if (pagesWrapperRef.current) pagesWrapperRef.current.style.transform = `scale(${factor})`;
+    };
+
+    const endPinch = () => {
+      if (!pinchState.current.active) return;
+      pinchState.current.active = false;
+      const wrapper = pagesWrapperRef.current;
+      if (!wrapper) return;
+      const match = wrapper.style.transform.match(/scale\(([\d.]+)\)/);
+      const factor = match ? parseFloat(match[1]) : 1;
+      wrapper.style.transform = '';
+      wrapper.style.transformOrigin = '';
+      setZoomScale(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, pinchState.current.initialZoom * factor)));
+    };
+
+    const onTouchEnd = (e) => { if (e.touches.length < 2) endPinch(); };
+
+    container.addEventListener('touchstart', onTouchStart, { passive: true });
+    container.addEventListener('touchmove', onTouchMove, { passive: false });
+    container.addEventListener('touchend', onTouchEnd, { passive: true });
+    container.addEventListener('touchcancel', onTouchEnd, { passive: true });
+    return () => {
+      container.removeEventListener('touchstart', onTouchStart);
+      container.removeEventListener('touchmove', onTouchMove);
+      container.removeEventListener('touchend', onTouchEnd);
+      container.removeEventListener('touchcancel', onTouchEnd);
+    };
+  }, [zoomScale]);
 
   const addPlacementToPage = (pageNum) => {
     setPlacements((prev) => [...prev, { id: newPlacementId(), pageNumber: pageNum, x: 60, y: 78, widthPercent: DEFAULT_SIG_PERCENT }]);
@@ -555,6 +618,7 @@ function SignPageContent() {
           </div>
         )}
 
+        <div ref={pagesWrapperRef}>
         {!pdfRenderLoading && pdfPages.map((pageObj) => {
           const pagePlacements = placements.filter((p) => p.pageNumber === pageObj.pageNumber);
           return (
@@ -626,6 +690,7 @@ function SignPageContent() {
             </div>
           );
         })}
+        </div>
 
         {!pdfRenderLoading && pdfPages.length > 1 && (
           <div className="fixed top-16 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center">
